@@ -1,0 +1,107 @@
+# MOTIM Configuration
+# Copy this to ~/.motim/config.yaml to customize
+
+# Header profiles define which headers to include in requests
+profiles:
+  # Just authentication essentials
+  minimal:
+    include:
+      - authorization
+      - x-api-key
+      - api-key
+
+  # Auth + common API headers (default)
+  standard:
+    include:
+      - authorization
+      - cookie
+      - x-*
+    exclude:
+      - x-request-id
+      - x-correlation-id
+
+  # Everything captured (for debugging)
+  full:
+    include:
+      - "*"
+    exclude:
+      - host
+      - content-length
+      - connection
+      - accept-encoding
+
+# Default client settings
+defaults:
+  profile: standard
+  timeout: 30.0
+  retries: 0
+  verify_ssl: true
+
+# Per-service overrides
+services:
+  # Example:
+  # notion:
+  #   profile: full
+  #   timeout: 60
+  # google:
+  #   profile: minimal
+
+# Proxy capture settings
+capture:
+  # Headers to never capture
+  skip_headers:
+    - accept-encoding
+    - connection
+    - content-length
+    - host
+    - user-agent
+    - accept
+    - accept-language
+    - cache-control
+    - pragma
+    - sec-fetch-dest
+    - sec-fetch-mode
+    - sec-fetch-site
+    - sec-ch-ua
+    - sec-ch-ua-mobile
+    - sec-ch-ua-platform
+    - upgrade-insecure-requests
+    - dnt
+
+  # Domains to ignore (analytics, ads, etc.)
+  skip_domains:
+    - "*.google-analytics.com"
+    - "*.doubleclick.net"
+    - "*.googletagmanager.com"
+    - "*.facebook.com"
+    - "*.twitter.com"
+    - "*.linkedin.com"
+
+  # Sample limits
+  max_samples_per_endpoint: 50
+  max_samples_total: 1000
+
+  # YAML specs (service summaries). Disable for max performance (DB-only capture).
+  write_specs: true
+
+  # Agent database (SQLite) - full-fidelity exchanges for replay/diffing
+  store_exchanges: true
+  exchange_db_path: "~/.motim/motim.sqlite3"
+  max_body_bytes: 1000000
+  exchange_db_buffered: true
+  exchange_db_queue_max: 10000
+  exchange_db_batch_size: 100
+  exchange_db_flush_interval_ms: 250
+
+  # Capture pipeline performance
+  pipeline_enabled: true
+  pipeline_queue_max: 5000
+  pipeline_drop_when_full: true
+  pipeline_max_parse_bytes: 200000
+
+  # Logging
+  log_every_n: 25
+
+  # Profiling (prints periodic timing + queue stats)
+  profile_enabled: false
+  profile_every_n: 200

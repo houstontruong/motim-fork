@@ -1,0 +1,33 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging / build outputs
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Test / tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# MOTIM data
+.motim/
+*.sqlite3
+
+# Environment / secrets
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+IMPROVEMENT_PRD.md

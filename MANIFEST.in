@@ -1,0 +1,3 @@
+exclude research/**
+prune research
+prune tests

@@ -1,0 +1,90 @@
+[project]
+name = "motim"
+version = "0.2.1"
+description = "MOTIM (Model Over Traffic — Intercept & Manage) - Proxy for capturing, querying, and replaying API traffic"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "vaibhavk97" }]
+keywords = ["mitm", "proxy", "http", "api", "motim", "mitmproxy", "httpx", "traffic", "intercept"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: Proxy Servers",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+dependencies = [
+    # Core
+    "mitmproxy>=10.0.0,<12",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0",
+    "click>=8.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/vaibhavk97/motim"
+Repository = "https://github.com/vaibhavk97/motim"
+Issues = "https://github.com/vaibhavk97/motim/issues"
+Changelog = "https://github.com/vaibhavk97/motim/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-httpx>=0.30.0",
+    "ruff>=0.3.0",
+    "mypy>=1.8.0",
+    "types-PyYAML>=6.0.0.20240106",
+    "build>=1.2.0",
+    "twine>=5.0.0",
+]
+curl = [
+    "curl_cffi>=0.14.0",
+]
+linkfinder = [
+    "jsbeautifier>=1.15.0",
+]
+
+[project.scripts]
+motim = "motim.cli.main:cli"
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["motim*"]
+
+[tool.setuptools.package-data]
+motim = ["default_config.yaml", "skill.md", "py.typed"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["yaml"]
+ignore_missing_imports = true
