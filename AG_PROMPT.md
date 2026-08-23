@@ -1,4 +1,4 @@
-# AG_PROMPT.md — Motim Account-Read Reconciliation: Codex Audit Remediation
+# AG_PROMPT.md — Motim Account-Read Reconciliation: Final Codex Remediation
 
 Working directory: `C:\Users\houst\PycharmProjects\motim-fork`
 (If the folder does not exist, clone it first: `git clone https://github.com/houstontruong/motim-fork.git`)
@@ -6,14 +6,13 @@ Working directory: `C:\Users\houst\PycharmProjects\motim-fork`
 Read `./SPEC.md` before coding. Treat it as a brief, not a blueprint.
 
 ## Task
-Remediate the two unresolved Codex audit findings in the existing **offline-only** account-read reconciliation layer. Read `SPEC.md`, `ACCOUNT_READ_CONTRACT.md`, `MOTIM_ACCOUNT_READ_AUDIT.md`, and the current tests before changing code.
+Remediate the one remaining Codex audit finding in the existing **offline-only** account-read reconciliation layer. Read `SPEC.md`, `ACCOUNT_READ_CONTRACT.md`, `MOTIM_ACCOUNT_READ_AUDIT.md`, the prior remediation report, and the current tests before changing code.
 
-The audit reproduced both defects against commit `3ec9aa6`:
+Round 4 is already implemented in `6352d88`; do not regress it. The fresh audit reproduced this remaining defect:
 
-1. Nested authentication material is fail-open: fields such as `signature`, `session_id`, `credentials`, and `passphrase` below `response.body.metadata` are accepted and facts are emitted. The boundary must reject authentication-material keys recursively and return a redacted structured `invalid_input` result with zero facts.
-2. Any non-empty `request.method`, including `POST`, is accepted. This is account-read only: accept normalized `GET` only and reject `POST`, `PUT`, `PATCH`, and `DELETE` with structured `invalid_input` output.
+1. Nested authentication material is still fail-open for `nonce`: a syntactically valid `GET` record with `response.body.metadata.nonce` returns `ok` with a fact. The recursive boundary must reject `nonce` (including normalized variants) with a redacted structured `invalid_input` result and zero facts.
 
-Choose the smallest robust implementation that satisfies the contract. Add end-to-end JSONL/API regressions for the nested key families and CLI/API regressions for non-GET methods; preserve the strict no-network/no-replay/no-real-credentials guarantee. This task must never capture traffic, sign in, make an HTTP/WebSocket request, open a socket, reintroduce replay/export of credential-bearing data, or provide a real-capture runbook.
+Choose the smallest robust implementation that satisfies the contract. Add direct API, JSONL, and CLI regressions for nested `nonce` fields, including redaction and zero-fact assertions; preserve the strict no-network/no-replay/no-real-credentials guarantee. This task must never capture traffic, sign in, make an HTTP/WebSocket request, open a socket, reintroduce replay/export of credential-bearing data, or provide a real-capture runbook.
 
 If you see a better approach than this brief describes, say so and explain why before changing direction.
 
@@ -37,7 +36,7 @@ When ALL output files are written, run this in PowerShell to notify OpenClaw:
 $topic = "ag-openclaw-b4zaCyNakC3zMJ566TYCa0ifoXdprXhwu9gm5UjdiJs"
 $payload = @{
   schema = "ag.ntfy.v1"
-  job = "motim-account-read-codex-fixes-4"
+  job = "motim-account-read-codex-fixes-5"
   status = "complete"
   project_dir = "C:\Users\houst\PycharmProjects\motim-fork"
   required = @("motim-account-read-audit-fix.md", "motim-account-read-report.md")
