@@ -37,6 +37,7 @@ AUTH_KEY_PATTERNS = (
     "client_secret",
     "auth",
     "authentication",
+    "nonce",
 )
 
 # JWT / Canary / Secret value patterns
@@ -105,6 +106,7 @@ def contains_auth_elements(val: Any) -> bool:
                     "credential",
                     "passphrase",
                     "auth",
+                    "nonce",
                 )
             ):
                 return True
@@ -128,6 +130,7 @@ def contains_auth_elements(val: Any) -> bool:
                 "credential",
                 "passphrase",
                 "auth",
+                "nonce",
             )
         ):
             return True

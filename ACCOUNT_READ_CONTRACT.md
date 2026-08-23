@@ -11,7 +11,7 @@ The Motim Account-Read Reconciliation layer translates local, pre-sanitized exch
 
 ### Non-Negotiable Safety Constraints:
 - **Offline Only:** Production modules contain no network imports (`socket`, `requests`, `httpx`, `urllib`, `aiohttp`, `websocket`, `mitmproxy`).
-- **No Auth / Secrets:** Input files are scanned recursively for auth-shaped fields (`authorization`, `cookie`, `token`, `secret`, `password`, `passphrase`, `signature`, `session_id`, `credentials`, JWTs, Bearer tokens). Any matching field or key anywhere in the input tree causes immediate rejection (`invalid_input`, exit code 4) with redacted error messages that never echo secret values.
+- **No Auth / Secrets:** Input files are scanned recursively for auth-shaped fields (`authorization`, `cookie`, `token`, `secret`, `password`, `passphrase`, `signature`, `session_id`, `credentials`, `nonce`, JWTs, Bearer tokens). Any matching field or key anywhere in the input tree causes immediate rejection (`invalid_input`, exit code 4) with redacted error messages that never echo secret values.
 - **Read-Only HTTP Methods:** Only normalized `GET` is accepted for `request.method`; mutating methods (`POST`, `PUT`, `PATCH`, `DELETE`) are rejected with `invalid_input` (exit 4).
 - **Deterministic & Pure:** All calculations (decimal conversions, hashing, staleness) are deterministic and depend solely on explicit arguments. No system clock or environment access.
 - **Traceability:** Every produced fact maintains an explicit list of `source_exchange_ids` linking it back to the input fixture records.

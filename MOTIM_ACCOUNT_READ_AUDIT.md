@@ -76,4 +76,16 @@ Fix all four findings with targeted regressions:
 3. **MEDIUM — datetime `as_of` is falsely labeled UTC** (`engine.py:206`). Require an aware UTC datetime, or convert aware non-UTC values to UTC before serializing. Reject naïve values. Test naïve, non-UTC aware, and UTC values with their correct staleness behavior.
 4. **LOW — invalid direct API types bypass taxonomy** (`engine.py:184`). Non-string provider and non-iterable exchanges must return structured `invalid_input`, not raise. Add tests.
 
-Update the report, run full tests, commit/push, and do not broaden scope.
+## Round 4 — Required follow-up after `3ec9aa6`
+
+Fix both findings with targeted regressions:
+
+1. **HIGH — nested authentication material fail-open** (`validator.py:18`). Reject authentication material key families (`signature`, `session_id`, `credentials`, `passphrase`) recursively with structured `invalid_input` and zero facts.
+2. **MEDIUM — non-GET request methods accepted** (`validator.py:270`). Enforce normalized `GET`-only for `request.method`; reject mutating methods (`POST`, `PUT`, `PATCH`, `DELETE`) with `invalid_input`.
+
+## Round 5 — Final Codex Remediation
+
+Fix the remaining defect with targeted regressions:
+
+1. **HIGH — nested authentication material fail-open for nonce** (`validator.py:18`). A syntactically valid `GET` record with `response.body.metadata.nonce` (or normalized variants such as `request_nonce`, `api_nonce`, `client_nonce`, `x-nonce`, `x_nonce`, `nonce_str`) must be rejected recursively with structured redacted `invalid_input` and zero facts.
+

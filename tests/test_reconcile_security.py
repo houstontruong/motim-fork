@@ -18,6 +18,7 @@ SENTINEL_VALUES = (
     "canary_api_key_secret_7766",
     "canary_password_secret_5544",
     "canary_auth_token_3322",
+    "canary_nonce_secret_8899",
 )
 
 
@@ -195,10 +196,19 @@ class TestGate5SecurityRegression:
             ("user_credentials", "CANARY_USER_CREDS_445566"),
             ("request_signature", "CANARY_REQ_SIG_778899"),
             ("api_passphrase", "CANARY_API_PASSPHRASE_001122"),
+            ("nonce", "CANARY_NONCE_VALUE_1234567890"),
+            ("request_nonce", "CANARY_REQ_NONCE_9876543210"),
+            ("api_nonce", "CANARY_API_NONCE_AABBCCDDEEFF"),
+            ("client_nonce", "CANARY_CLIENT_NONCE_11223344"),
+            ("x_nonce", "CANARY_X_NONCE_55667788"),
+            ("x-nonce", "CANARY_X_HYPHEN_NONCE_990011"),
+            ("nonce_str", "CANARY_NONCE_STR_22334455"),
+            ("Nonce", "CANARY_PASCAL_NONCE_66778899"),
+            ("NONCE", "CANARY_UPPER_NONCE_00112233"),
         ],
     )
     def test_nested_auth_material_key_families_rejected_below_metadata(self, auth_key: str, sentinel_value: str, tmp_path: Path):
-        """Authentication material keys (signature, session_id, credentials, passphrase) below response.body.metadata are rejected with zero facts."""
+        """Authentication material keys (signature, session_id, credentials, passphrase, nonce) below response.body.metadata are rejected with zero facts."""
         # 1. Direct Python API (nested dictionary below response.body.metadata)
         exchange_dict = {
             "schema_version": "motim.sanitized_exchange.v1",
@@ -258,4 +268,67 @@ class TestGate5SecurityRegression:
         cli_data = json.loads(cli_res.output)
         assert cli_data["outcome"] == "invalid_input"
         assert len(cli_data["facts"]) == 0
+
+    def test_nested_nonce_rejection_reproduction_and_zero_facts(self, tmp_path: Path):
+        """Direct audit reproduction: syntactically valid GET record with response.body.metadata.nonce returns invalid_input and zero facts."""
+        sentinel_nonce = "CANARY_AUDIT_NONCE_FAIL_OPEN_PROOF_998877"
+        record = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": "audit-nonce-repro-001",
+            "provider": "bybit",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": "positions"},
+            "response": {
+                "status": 200,
+                "body": {
+                    "result": {
+                        "list": [
+                            {
+                                "symbol": "ETHUSDT",
+                                "side": "Buy",
+                                "size": "10.0",
+                                "entryPrice": "3000",
+                                "markPrice": "3050",
+                            }
+                        ]
+                    },
+                    "metadata": {
+                        "nonce": sentinel_nonce,
+                    },
+                },
+            },
+        }
+
+        # Direct Python API validation
+        res = reconcile([record], "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res.outcome == Outcome.INVALID_INPUT.value
+        assert len(res.facts) == 0
+        assert len(res.issues) >= 1
+        res_json = json.dumps(res.to_dict())
+        assert sentinel_nonce not in res_json
+        for issue in res.issues:
+            assert sentinel_nonce not in issue.message
+            assert "[REDACTED]" in issue.message or "auth" in issue.message.lower()
+
+        # Direct JSONL string validation
+        raw_jsonl = json.dumps(record) + "\n"
+        res_jsonl = reconcile(raw_jsonl, "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res_jsonl.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_jsonl.facts) == 0
+        assert sentinel_nonce not in json.dumps(res_jsonl.to_dict())
+
+        # CLI subprocess execution validation
+        jsonl_path = tmp_path / "nonce_repro.jsonl"
+        jsonl_path.write_text(raw_jsonl, encoding="utf-8")
+        runner = CliRunner()
+        cli_res = runner.invoke(
+            cli,
+            ["reconcile", "--input", str(jsonl_path), "--provider", "bybit", "--as-of", "2026-08-23T14:05:00Z"],
+        )
+        assert cli_res.exit_code == 4
+        assert sentinel_nonce not in cli_res.output
+        cli_out = json.loads(cli_res.output)
+        assert cli_out["outcome"] == "invalid_input"
+        assert len(cli_out["facts"]) == 0
+
 

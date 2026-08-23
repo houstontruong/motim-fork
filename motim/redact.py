@@ -52,6 +52,8 @@ SENSITIVE_HEADER_NAMES = frozenset(
         "x-signature",
         "x-amz-security-token",
         "x-amz-credential",
+        "nonce",
+        "x-nonce",
     }
 )
 
@@ -75,6 +77,7 @@ SENSITIVE_QUERY_PARAMS = frozenset(
         "signature",
         "jwt",
         "code",
+        "nonce",
     }
 )
 
@@ -102,6 +105,7 @@ SENSITIVE_KEY_SUBSTRINGS = (
     "ssn",
     "bearer",
     "key",
+    "nonce",
 )
 
 # Regex matching JWT structures (header.payload.signature)
@@ -169,7 +173,7 @@ class Redactor:
             return self.placeholder
 
         # Check if header name contains sensitive words
-        if any(sub in name_lower for sub in ("token", "secret", "auth-", "api-key", "apikey", "signature")):
+        if any(sub in name_lower for sub in ("token", "secret", "auth-", "api-key", "apikey", "signature", "nonce")):
             return self.placeholder
 
         # Regex scan value for embedded JWTs, Bearer tokens, or private keys
@@ -221,7 +225,7 @@ class Redactor:
                 k_str = str(k)
                 k_lower = k_str.lower()
                 if k_lower in self.sensitive_query_params or any(
-                    sub in k_lower for sub in ("token", "secret", "pass", "key", "auth", "sig")
+                    sub in k_lower for sub in ("token", "secret", "pass", "key", "auth", "sig", "nonce")
                 ):
                     redacted_pairs.append((k_str, self.placeholder))
                 else:
