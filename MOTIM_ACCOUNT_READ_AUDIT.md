@@ -66,3 +66,14 @@ The first remediation fixed the original 7 findings and passed 171 clean-venv te
 3. **LOW — ambiguous valid file paths are treated as literal JSONL** (`motim/reconcile/engine.py:62`). Preserve literal-JSONL support without making existing paths inaccessible merely because their names begin with `{` or contain a newline. Prefer a safe `Path.exists()` attempt with `OSError` handling before choosing literal parsing, then add a regression test.
 
 Update the report, run the full suite, commit/push, and request the same final verification. Do not broaden scope.
+
+## Round 3 — Required follow-up after `e4a3d6f`
+
+Fix all four findings with targeted regressions:
+
+1. **HIGH — direct API secret scan skips tuples/sets** (`validator.py:78`). `contains_auth_elements` must recurse through every accepted container type, or the direct API must strictly normalize/reject non-JSON containers before scanning. A nested tuple/set containing secret-shaped data must return `invalid_input` and never expose the sentinel.
+2. **MEDIUM — literal JSONL conflicts with an existing filename** (`engine.py:62`). Define deterministic interpretation. A literal JSON/JSONL string must never silently read a same-named file. Prefer explicit `Path` objects for file inputs and treat strings as literal input, or provide an explicit safe file-input surface; preserve the CLI's Path behavior. Test a working-directory file named `{}` plus a literal `{}` input.
+3. **MEDIUM — datetime `as_of` is falsely labeled UTC** (`engine.py:206`). Require an aware UTC datetime, or convert aware non-UTC values to UTC before serializing. Reject naïve values. Test naïve, non-UTC aware, and UTC values with their correct staleness behavior.
+4. **LOW — invalid direct API types bypass taxonomy** (`engine.py:184`). Non-string provider and non-iterable exchanges must return structured `invalid_input`, not raise. Add tests.
+
+Update the report, run full tests, commit/push, and do not broaden scope.
