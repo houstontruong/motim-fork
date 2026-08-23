@@ -798,4 +798,50 @@ def test_persistence_path_bomless_utf16_redaction(tmp_path: Path):
         db.close()
 
 
+def test_redactor_malformed_percent_sequences_and_hostile_size():
+    """Verify Redactor treats malformed percent sequences as sensitive and handles hostile size without quadratic cost."""
+    import time
+    redactor = Redactor(profile="strict")
+
+    # 1. Malformed percent sequences classified as sensitive
+    malformed_keys = [
+        "api%GG_key",
+        "api%G0_key",
+        "api%0G_key",
+        "api%",
+        "pass%word",
+        "tok%en",
+        "sec%ret",
+        "x%api%key",
+    ]
+    for k in malformed_keys:
+        assert redactor.is_sensitive_name(k), f"Expected {k} to be sensitive"
+
+    # 2. Redaction of data structures with malformed percent keys
+    canary = "CANARY_MALFORMED_PERCENT_SECRET_9911"
+    struct = {
+        "api%GG_key": canary,
+        "api%G0_key": canary,
+        "api%0G_key": canary,
+        "api%": canary,
+        "pass%word": canary,
+        "symbol": "BTCUSDT",
+    }
+    redacted = redactor.redact_data_structure(struct)
+    assert redacted["api%GG_key"] == "[REDACTED]"
+    assert redacted["api%G0_key"] == "[REDACTED]"
+    assert redacted["api%0G_key"] == "[REDACTED]"
+    assert redacted["api%"] == "[REDACTED]"
+    assert redacted["pass%word"] == "[REDACTED]"
+    assert redacted["symbol"] == "BTCUSDT"
+
+    # 3. Hostile-size payload with thousands of repeated %25
+    hostile_key = "api" + "%25" * 10000 + "_key"
+    t0 = time.perf_counter()
+    assert redactor.is_sensitive_name(hostile_key)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 0.1, f"Hostile key processing took too long: {elapsed:.3f}s"
+
+
+
 

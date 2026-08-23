@@ -124,16 +124,21 @@ _CANARY_TOKEN_PATTERN = re.compile(
 )
 
 
+MAX_DECODE_DEPTH = 10
+MAX_KEY_LENGTH = 512
+
+
 def normalize_sensitive_name(name: Any) -> str:
     """Normalize a header, query parameter, or field name for sensitive pattern matching.
 
-    Iteratively unquotes percent-encoded characters until fixpoint, converts to lowercase,
-    and strips hyphens and underscores.
+    Unquotes percent-encoded characters up to a constant depth limit, converts to lowercase,
+    and strips hyphens, underscores, and percent signs.
     """
     s = str(name)
+    if len(s) > MAX_KEY_LENGTH:
+        return s.lower().replace("-", "").replace("_", "").replace("%", "")
     try:
-        limit = max(64, len(s))
-        for _ in range(limit):
+        for _ in range(MAX_DECODE_DEPTH):
             if "%" not in s and "+" not in s:
                 break
             unq = unquote_plus(s)
@@ -142,7 +147,7 @@ def normalize_sensitive_name(name: Any) -> str:
             s = unq
     except Exception:
         pass
-    return s.lower().replace("-", "").replace("_", "")
+    return s.lower().replace("-", "").replace("_", "").replace("%", "")
 
 
 class Redactor:
@@ -178,6 +183,14 @@ class Redactor:
 
     def is_sensitive_name(self, name: Any) -> bool:
         """Check if a header, query parameter, or field name is sensitive under normalized matching."""
+        if not name:
+            return False
+        s_raw = str(name)
+        if len(s_raw) > MAX_KEY_LENGTH:
+            return True
+        # Any unresolved percent character in a field or header name is treated as sensitive/suspicious
+        if "%" in s_raw:
+            return True
         name_norm = normalize_sensitive_name(name)
         if not name_norm:
             return False

@@ -9,11 +9,12 @@
 
 ## 1. Executive Summary
 
-This report documents the remediation of all audit findings across all rounds, including the Round 10 finding from the Codex audit of commit `cb21423` in the offline-only account-read reconciliation layer and defense-in-depth redaction engine of `motim-fork`:
+This report documents the remediation of all audit findings across all rounds, including the two Round 11 findings from the Codex audit of commit `08ae77b` in the offline-only account-read reconciliation layer and defense-in-depth redaction engine of `motim-fork`:
 
-1. **Defect 1 (Round 10 — Deep Percent-Encoding Bypass - HIGH):** `validator._fully_unquote_plus()` and adapter issue sanitizers previously had a 5-round decode limit. A route whose structural delimiters were encoded six or more times (e.g. `unsupported?api_key=TOPSECRET_DEPTH6` encoded to 6+ layers) bypassed validation and reached adapter unsupported-route issue generation, reflecting the encoded secret. We replaced the fixed 5-round limit with a length-derived safe bound (`max(64, len(raw))`), unquoting to true fixpoint, while failing closed (`_has_percent_encoding`) on unresolved percent-encoding at the bounded limit with `ValidationError("Rejected input containing auth-shaped field [REDACTED]", code="auth_field_detected")`, returning structured `outcome: "invalid_input"`, zero facts, and exit code 4. Adapters also defensively fall back to `[REDACTED_ROUTE]` if any unresolved percent-encoding or suspicious delimiter remains.
+1. **Defect 1 (Round 11 — Malformed Percent Sequences Bypass Auth/Redaction - HIGH):** Previously, `_has_percent_encoding()` only matched valid `%XX` triples. Malformed percent sequences such as `api%GG_key`, `api%G0_key`, `api%0G_key`, `api%`, and `pass%word` bypassed `contains_auth_elements()` and `Redactor.is_sensitive_name()`. We updated the validator, redactor, and adapter issue formatting to treat **any remaining percent character (`%`)** in a sensitive-name, key, or route parsing context as unresolved and suspicious after bounded decoding. Any input containing malformed percent sequences in routes, query params, fragments, or payload keys is rejected at ingest with `ValidationError("Rejected input containing auth-shaped field [REDACTED]", code="auth_field_detected")`, returning structured `outcome: "invalid_input"`, zero facts emitted, and CLI exit code 4. In `Redactor`, any field or header name with `%` is classified as sensitive and its value is masked to `[REDACTED]`. In adapters, routes with unresolved `%` in their clean segment fall back to `[REDACTED_ROUTE]`.
+2. **Defect 2 (Round 11 — Quadratic Decoding CPU Cost - MEDIUM):** The input-length-derived decode bound in prior rounds created potential quadratic CPU scaling on hostile inputs with thousands of repeated `%25` sequences. We replaced the dynamic bound with a small constant depth cap (`MAX_DECODE_DEPTH = 10`), enforced strict maximum length bounds on route keys (`MAX_ROUTE_LENGTH = 1024`) and payload keys (`MAX_FIELD_KEY_LENGTH = 512`), and failed closed immediately on hostile inputs without multi-second CPU processing (verified $< 0.1$s execution).
 
-All defects have been remediated within the strict offline-only, zero-network, zero-credential safety boundary. All 294 tests in the suite pass cleanly.
+All defects have been remediated within the strict offline-only, zero-network, zero-credential safety boundary. All 310 tests in the suite pass cleanly.
 
 ---
 
@@ -88,13 +89,14 @@ A route key containing URL query credentials or userinfo (e.g., `positions?api_k
 
 | File | Changes Made |
 |---|---|
-| `motim/reconcile/validator.py` | Added `_has_percent_encoding` to detect unresolved percent-encoding; replaced 5-round limit in `_fully_unquote_plus` with length-derived safe bound (`max(64, len(raw))`); updated `_is_auth_string` to fail closed on unresolved percent-encoding at the bounded limit. |
-| `motim/reconcile/adapters/bybit.py` | Defensively sanitized unsupported route messages using `_has_percent_encoding` and `_fully_unquote_plus`, falling back to `[REDACTED_ROUTE]` on unresolved encoding or suspicious delimiters. |
-| `motim/reconcile/adapters/lighter.py` | Defensively sanitized unsupported route messages using `_has_percent_encoding` and `_fully_unquote_plus`, falling back to `[REDACTED_ROUTE]` on unresolved encoding or suspicious delimiters. |
-| `motim/redact.py` | Updated `normalize_sensitive_name` with bounded iterative unquoting (`max(64, len(s))`) to resolve arbitrarily deep percent-encoded sensitive names. |
-| `tests/test_reconcile_security.py` | Added parameterized `test_deep_percent_encoded_structural_delimiters_rejected_at_depths_6_to_20` across Bybit and Lighter via API, JSONL strings, and CLI, and added `test_adapter_deep_percent_encoding_unsupported_route_sanitization_defense_in_depth`. |
-| `MOTIM_ACCOUNT_READ_AUDIT.md` | Added Round 10 audit specifications. |
-| `motim-account-read-report.md` | Updated execution report with Round 10 verification evidence and 294-test suite output. |
+| `motim/reconcile/validator.py` | Added constant depth cap `MAX_DECODE_DEPTH = 10`, `MAX_ROUTE_LENGTH = 1024`, and `MAX_FIELD_KEY_LENGTH = 512`; updated `_fully_unquote_plus` to use small constant cap; updated `_is_auth_string` and `contains_auth_elements` to treat any percent character (`%`) in routes, query params, fragments, and payload keys as unresolved/suspicious, rejecting at ingestion with `invalid_input`, zero facts, and exit code 4. |
+| `motim/redact.py` | Updated `normalize_sensitive_name` with constant depth cap `MAX_DECODE_DEPTH = 10` and key length cap `MAX_KEY_LENGTH = 512`; updated `is_sensitive_name` to classify any key with `%` as sensitive, masking values in `redact_data_structure`. |
+| `motim/reconcile/adapters/bybit.py` | Defensively sanitized unsupported route issue messages using `_fully_unquote_plus` and falling back to `[REDACTED_ROUTE]` on length violation or if `%` remains in the clean route segment. |
+| `motim/reconcile/adapters/lighter.py` | Defensively sanitized unsupported route issue messages using `_fully_unquote_plus` and falling back to `[REDACTED_ROUTE]` on length violation or if `%` remains in the clean route segment. |
+| `tests/test_redaction.py` | Added `test_redactor_malformed_percent_sequences_and_hostile_size` verifying sensitive classification, value masking, and non-quadratic execution on hostile inputs. |
+| `tests/test_reconcile_security.py` | Added parameterized `test_malformed_percent_sequences_rejected_with_zero_facts` across Bybit and Lighter via direct API, JSONL strings, and CLI; added `test_malformed_percent_field_keys_in_payload_rejected_with_zero_facts`, `test_hostile_size_and_depth_limits_performance`, and `test_adapter_malformed_percent_route_sanitization_defense_in_depth`. |
+| `MOTIM_ACCOUNT_READ_AUDIT.md` | Added Round 11 audit specifications. |
+| `motim-account-read-report.md` | Updated execution report with Round 11 verification evidence and 310-test suite output. |
 | `motim-account-read-audit-fix.md` | This document. |
 
 ---
@@ -113,29 +115,29 @@ configfile: pyproject.toml
 testpaths: tests
 plugins: anyio-4.13.0, asyncio-1.3.0, timeout-2.4.0
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 294 items
+collected 310 items
 
-tests\test_auth.py .....................                                 [  7%]
+tests\test_auth.py .....................                                 [  6%]
 tests\test_cli.py .................                                      [ 12%]
-tests\test_client.py ..                                                  [ 13%]
-tests\test_config.py ............                                        [ 17%]
-tests\test_diff.py .                                                     [ 18%]
-tests\test_egress.py ........                                            [ 20%]
-tests\test_exchange_db.py .....                                          [ 22%]
-tests\test_exchange_writer.py .                                          [ 22%]
-tests\test_gates.py ..................                                   [ 28%]
-tests\test_linkfinder_integration.py ..                                  [ 29%]
-tests\test_reconcile_adapters.py .....                                   [ 31%]
-tests\test_reconcile_cli.py ..............                               [ 36%]
-tests\test_reconcile_contract.py .....................................   [ 48%]
-tests\test_reconcile_no_network.py ...                                   [ 49%]
-tests\test_reconcile_security.py ....................................... [ 62%]
-..................................................                       [ 79%]
-tests\test_redaction.py .................                                [ 85%]
-tests\test_service.py ........................                           [ 93%]
+tests\test_client.py ..                                                  [ 12%]
+tests\test_config.py ............                                        [ 16%]
+tests\test_diff.py .                                                     [ 17%]
+tests\test_egress.py ........                                            [ 19%]
+tests\test_exchange_db.py .....                                          [ 21%]
+tests\test_exchange_writer.py .                                          [ 21%]
+tests\test_gates.py ..................                                   [ 27%]
+tests\test_linkfinder_integration.py ..                                  [ 28%]
+tests\test_reconcile_adapters.py .....                                   [ 29%]
+tests\test_reconcile_cli.py ..............                               [ 34%]
+tests\test_reconcile_contract.py .....................................   [ 46%]
+tests\test_reconcile_no_network.py ...                                   [ 47%]
+tests\test_reconcile_security.py ....................................... [ 59%]
+.................................................................        [ 80%]
+tests\test_redaction.py ..................                               [ 86%]
+tests\test_service.py ........................                           [ 94%]
 tests\test_store.py ..................                                   [100%]
 
-============================= 294 passed in 7.07s =============================
+============================= 310 passed in 6.86s =============================
 ```
 
 ### 4.2 Security & Redaction Regressions (`pytest -v tests/test_redaction.py tests/test_reconcile_security.py`)
@@ -143,7 +145,7 @@ tests\test_store.py ..................                                   [100%]
 **Exit Code:** `0`  
 **Actual Output:**
 ```text
-============================= 106 passed in 0.79s =============================
+============================= 122 passed in 0.84s =============================
 ```
 
 ### 4.3 Contract Tests (`pytest -v tests/test_reconcile_contract.py`)
@@ -167,7 +169,7 @@ tests\test_store.py ..................                                   [100%]
 ## 5. Safety Boundary Verification & Remaining Gaps
 
 - **Offline-Only Invariant:** Verified via AST inspection (`test_ast_rejects_network_and_proxy_imports`) and active socket sabotage (`test_subprocess_execution_under_blocked_socket_guard`). No socket, network client, or network library is imported or invoked.
-- **Zero Credentials / Zero Replay:** Deeply percent-encoded credentials (tested through 20 layers of encoding), route fragments, BOM-less UTF-16 credentials, colon-separated plain text secrets, and NUL-bearing binary payloads are rejected or sanitized across all boundaries with zero leaks. No network replay code exists.
-- **Remaining Gaps:** None. All findings from the Codex audit of commit `cb21423` are completely resolved with comprehensive regression tests. Live account capture, traffic recording, and network clients remain strictly out of scope.
+- **Zero Credentials / Zero Replay:** Malformed percent sequences (`%GG`, `%G0`, `%0G`, `%`), deep percent-encoded credentials, route fragments, BOM-less UTF-16 credentials, colon-separated plain text secrets, and NUL-bearing binary payloads are rejected or sanitized across all boundaries with zero leaks. No network replay code exists.
+- **Remaining Gaps:** None. All findings from the Codex audit of commit `08ae77b` are completely resolved with comprehensive regression tests. Live account capture, traffic recording, and network clients remain strictly out of scope.
 
 

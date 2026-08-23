@@ -6,7 +6,7 @@ from typing import Any
 
 from motim.reconcile.decimal_util import normalize_asset, to_canonical_decimal_str
 from motim.reconcile.models import Fact, FactType, Issue, IssueCode, Severity
-from motim.reconcile.validator import _fully_unquote_plus, _has_percent_encoding
+from motim.reconcile.validator import MAX_ROUTE_LENGTH, _fully_unquote_plus, _has_percent_encoding
 from .base import AdapterResult, BaseAdapter
 
 SUPPORTED_ROUTES = frozenset(
@@ -28,12 +28,12 @@ class LighterAdapter(BaseAdapter):
         account_scope = exchange.get("account_scope") or "default"
 
         if not self.supports_route(route_key):
-            decoded_route = _fully_unquote_plus(route_key)
-            if _has_percent_encoding(decoded_route):
+            if len(route_key) > MAX_ROUTE_LENGTH:
                 clean_route = "[REDACTED_ROUTE]"
             else:
+                decoded_route = _fully_unquote_plus(route_key)
                 clean_route = decoded_route.split("?")[0].split("#")[0].split(";")[0].split("@")[-1].strip()
-                if not clean_route or any(c in clean_route for c in ("%", "?", "#", "=", "&", ";", "@")):
+                if not clean_route or "%" in clean_route or any(c in clean_route for c in ("?", "#", "=", "&", ";", "@")):
                     clean_route = "[REDACTED_ROUTE]"
             return AdapterResult(
                 facts=[],

@@ -125,6 +125,14 @@ Fix deep percent-encoding bypass finding with targeted regressions:
 
 1. **HIGH — Deep percent-encoding bypass** (`motim/reconcile/validator.py`, `adapters/bybit.py`, `adapters/lighter.py`, `motim/redact.py`). Decode multi-layer percent-encoded strings to true fixpoint with input length-derived safe bound (`max(64, len(raw))`), fail closed on unresolved percent-encoding after the bounded decode limit (`_has_percent_encoding`), and defensively sanitize route issue messages in Bybit and Lighter adapters with `[REDACTED_ROUTE]` fallback.
 
+## Round 11 — Bounded-Decoding Remediation
+
+Fix malformed percent bypass and quadratic CPU cost findings with targeted regressions:
+
+1. **HIGH — Malformed percent sequences bypass auth/redaction** (`motim/reconcile/validator.py`, `motim/redact.py`, `adapters/bybit.py`, `adapters/lighter.py`). Treat any remaining percent character in a route or key parsing context as unresolved and suspicious after bounded decoding: reject at ingestion with `invalid_input`, zero facts, and exit code 4; classify the name as sensitive in `Redactor.is_sensitive_name()`; defensively fall back to `[REDACTED_ROUTE]` in adapters.
+2. **MEDIUM — Quadratic decoding CPU cost** (`motim/reconcile/validator.py`, `motim/redact.py`). Replace input-length-derived decode bound with a small constant decode-depth cap (`MAX_DECODE_DEPTH = 10`), enforce maximum route length (`MAX_ROUTE_LENGTH = 1024`) and field key length (`MAX_FIELD_KEY_LENGTH = 512`), and fail closed without quadratic CPU processing.
+
+
 
 
 

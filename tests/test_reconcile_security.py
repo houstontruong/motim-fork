@@ -771,7 +771,163 @@ class TestGate5SecurityRegression:
         assert not res_lighter.is_supported
         assert len(res_lighter.issues) == 1
         assert canary_d12 not in res_lighter.issues[0].message
-        assert res_lighter.issues[0].message == "Lighter route 'unsupported_route' is not supported"
+        assert res_lighter.issues[0].message == "Lighter route '[REDACTED_ROUTE]' is not supported"
+
+    @pytest.mark.parametrize(
+        "provider,route_key,sentinel",
+        [
+            ("bybit", "positions?api%GG_key=CANARY_MAL_1", "CANARY_MAL_1"),
+            ("bybit", "positions?api%G0_key=CANARY_MAL_2", "CANARY_MAL_2"),
+            ("bybit", "positions?api%0G_key=CANARY_MAL_3", "CANARY_MAL_3"),
+            ("bybit", "positions?api%=CANARY_MAL_4", "CANARY_MAL_4"),
+            ("bybit", "positions?pass%word=CANARY_MAL_5", "CANARY_MAL_5"),
+            ("bybit", "positions#api%GG_key=CANARY_MAL_6", "CANARY_MAL_6"),
+            ("bybit", "unsupported%GG?api_key=CANARY_MAL_7", "CANARY_MAL_7"),
+            ("lighter", "trades?api%GG_key=CANARY_MAL_LIGHTER_1", "CANARY_MAL_LIGHTER_1"),
+            ("lighter", "account_positions#token%GG=CANARY_MAL_LIGHTER_2", "CANARY_MAL_LIGHTER_2"),
+            ("lighter", "unsupported?sec%ret=CANARY_MAL_LIGHTER_3", "CANARY_MAL_LIGHTER_3"),
+            ("lighter", "unsupported#pass%word=CANARY_MAL_LIGHTER_4", "CANARY_MAL_LIGHTER_4"),
+            ("lighter", "unsupported%0G#token=CANARY_MAL_LIGHTER_5", "CANARY_MAL_LIGHTER_5"),
+        ],
+    )
+    def test_malformed_percent_sequences_rejected_with_zero_facts(
+        self, provider: str, route_key: str, sentinel: str, tmp_path: Path
+    ):
+        """Routes with malformed percent sequences (%GG, %G0, %0G, %) are rejected with invalid_input and zero facts."""
+        body_content = (
+            {"result": {"list": [{"symbol": "BTCUSDT", "side": "Buy", "size": "1.0", "entryPrice": "50000", "markPrice": "50500"}]}}
+            if provider == "bybit"
+            else {"code": 200, "data": {"positions": [{"market_id": "BTC", "side": "LONG", "size": "1.0", "entry_price": "50000", "mark_price": "50500"}]}}
+        )
+        record = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": f"mal-pct-{provider}-001",
+            "provider": provider,
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": route_key},
+            "response": {
+                "status": 200,
+                "body": body_content,
+            },
+        }
+
+        # 1. Direct Python API
+        res_api = reconcile([record], provider, as_of="2026-08-23T14:05:00Z")
+        assert res_api.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_api.facts) == 0
+        assert len(res_api.issues) >= 1
+        res_json = json.dumps(res_api.to_dict())
+        assert sentinel not in res_json
+
+        # 2. JSONL string API
+        raw_jsonl = json.dumps(record) + "\n"
+        res_jsonl = reconcile(raw_jsonl, provider, as_of="2026-08-23T14:05:00Z")
+        assert res_jsonl.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_jsonl.facts) == 0
+        assert sentinel not in json.dumps(res_jsonl.to_dict())
+
+        # 3. CLI execution
+        fixture_file = tmp_path / f"mal_pct_{provider}.jsonl"
+        fixture_file.write_text(raw_jsonl, encoding="utf-8")
+        runner = CliRunner()
+        cli_res = runner.invoke(
+            cli,
+            ["reconcile", "--input", str(fixture_file), "--provider", provider, "--as-of", "2026-08-23T14:05:00Z"],
+        )
+        assert cli_res.exit_code == 4
+        assert sentinel not in cli_res.output
+        cli_out = json.loads(cli_res.output)
+        assert cli_out["outcome"] == "invalid_input"
+        assert len(cli_out["facts"]) == 0
+
+    def test_malformed_percent_field_keys_in_payload_rejected_with_zero_facts(self, tmp_path: Path):
+        """Field keys with malformed percent sequences in payload dicts are rejected with invalid_input and zero facts."""
+        sentinel_1 = "CANARY_MAL_KEY_SECRET_1122"
+        sentinel_2 = "CANARY_MAL_KEY_SECRET_3344"
+        record = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": "mal-key-001",
+            "provider": "bybit",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": "positions"},
+            "response": {
+                "status": 200,
+                "body": {
+                    "result": {
+                        "api%GG_key": sentinel_1,
+                        "pass%word": sentinel_2,
+                        "list": [],
+                    }
+                },
+            },
+        }
+
+        res_api = reconcile([record], "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res_api.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_api.facts) == 0
+        res_json = json.dumps(res_api.to_dict())
+        assert sentinel_1 not in res_json
+        assert sentinel_2 not in res_json
+
+    def test_hostile_size_and_depth_limits_performance(self, tmp_path: Path):
+        """Hostile-size routes with repeated %25 are rejected immediately without quadratic CPU cost."""
+        import time
+
+        sentinel = "CANARY_HOSTILE_SIZE_SECRET_9988"
+        hostile_route = "unsupported" + "%25" * 20000 + f"3Fapi_key={sentinel}"
+        record = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": "hostile-001",
+            "provider": "bybit",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": hostile_route},
+            "response": {
+                "status": 200,
+                "body": {"result": {"list": []}},
+            },
+        }
+
+        t0 = time.perf_counter()
+        res_api = reconcile([record], "bybit", as_of="2026-08-23T14:05:00Z")
+        elapsed = time.perf_counter() - t0
+        assert elapsed < 0.1, f"Reconciliation took too long on hostile input: {elapsed:.3f}s"
+        assert res_api.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_api.facts) == 0
+        assert sentinel not in json.dumps(res_api.to_dict())
+
+    def test_adapter_malformed_percent_route_sanitization_defense_in_depth(self):
+        """Adapters defensively sanitize routes with malformed percent sequences."""
+        from motim.reconcile.adapters.bybit import BybitAdapter
+        from motim.reconcile.adapters.lighter import LighterAdapter
+
+        bybit = BybitAdapter()
+        lighter = LighterAdapter()
+
+        canary_mal = "CANARY_ADAPTER_MAL_PERCENT_8877"
+        bybit_exchange = {
+            "exchange_id": "bybit-mal-001",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": f"unsupported%GG?api_key={canary_mal}"},
+            "response": {"status": 200, "body": {}},
+        }
+        res_bybit = bybit.reconcile_exchange(bybit_exchange)
+        assert not res_bybit.is_supported
+        assert len(res_bybit.issues) == 1
+        assert canary_mal not in res_bybit.issues[0].message
+        assert res_bybit.issues[0].message == "Bybit route '[REDACTED_ROUTE]' is not supported"
+
+        lighter_exchange = {
+            "exchange_id": "lighter-mal-001",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": f"unsupported%G0#token={canary_mal}"},
+            "response": {"status": 200, "body": {}},
+        }
+        res_lighter = lighter.reconcile_exchange(lighter_exchange)
+        assert not res_lighter.is_supported
+        assert len(res_lighter.issues) == 1
+        assert canary_mal not in res_lighter.issues[0].message
+        assert res_lighter.issues[0].message == "Lighter route '[REDACTED_ROUTE]' is not supported"
+
 
 
 

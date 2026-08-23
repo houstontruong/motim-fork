@@ -115,6 +115,14 @@ The deep-encoding finding from the Codex audit of commit `cb21423` has been reme
 |---|---|---|---|
 | **Deep percent-encoding bypass** | **HIGH** | Replaced the fixed 5-round decode limit in `_fully_unquote_plus()` and `normalize_sensitive_name()` with a safe bound derived from input length (`max(64, len(raw))`); added `_has_percent_encoding()` to fail closed on unresolved percent-encoding at the bounded limit with `ValidationError("Rejected input containing auth-shaped field [REDACTED]", code="auth_field_detected")`, returning structured `invalid_input`, zero facts, and exit code 4; updated `BybitAdapter` and `LighterAdapter` to defensively fall back to `[REDACTED_ROUTE]` on unresolved encoding or suspicious characters. | `tests/test_reconcile_security.py`<br>- `test_deep_percent_encoded_structural_delimiters_rejected_at_depths_6_to_20` covering Bybit and Lighter across depths 6 through 20 via direct API, JSONL strings, and CLI subprocess execution.<br>- `test_adapter_deep_percent_encoding_unsupported_route_sanitization_defense_in_depth` verifying adapter issue message sanitization at depths 6 and 12. |
 
+### Round 11 Remediation (Bounded-Decoding Remediation)
+Both findings from the Codex audit of commit `08ae77b` have been remediated with focused regression tests:
+
+| Finding | Severity | Description & Remediation | Regression Tests |
+|---|---|---|---|
+| **Malformed percent sequences bypass auth/redaction** | **HIGH** | Updated validator, redactor, and adapter issue formatting to treat any remaining percent character (`%`) in a sensitive-name, key, or route parsing context as unresolved and suspicious after bounded decoding: rejects at ingest with `ValidationError("Rejected input containing auth-shaped field [REDACTED]", code="auth_field_detected")`, returning structured `invalid_input`, zero facts, and exit code 4; classifies the key as sensitive in `Redactor.is_sensitive_name()`; defensively falls back to `[REDACTED_ROUTE]` in adapters. | `tests/test_reconcile_security.py`<br>- `test_malformed_percent_sequences_rejected_with_zero_facts` across Bybit and Lighter via direct API, JSONL strings, and CLI subprocess execution.<br>- `test_malformed_percent_field_keys_in_payload_rejected_with_zero_facts`<br>- `test_adapter_malformed_percent_route_sanitization_defense_in_depth`<br>`tests/test_redaction.py`<br>- `test_redactor_malformed_percent_sequences_and_hostile_size`. |
+| **Quadratic decoding CPU cost** | **MEDIUM** | Replaced dynamic input-length-derived decode bound with a small constant depth cap (`MAX_DECODE_DEPTH = 10`); enforced strict maximum length bounds on route keys (`MAX_ROUTE_LENGTH = 1024`) and payload keys (`MAX_FIELD_KEY_LENGTH = 512`); fails closed immediately on hostile inputs without multi-second CPU processing. | `tests/test_reconcile_security.py`<br>- `test_hostile_size_and_depth_limits_performance` proving structured failure in $< 0.1$s.<br>`tests/test_redaction.py`<br>- `test_redactor_malformed_percent_sequences_and_hostile_size` proving bounded execution in $< 0.1$s. |
+
 ---
 
 ## 3. Verification Gate Results (Gates 1 – 6)
@@ -125,8 +133,8 @@ The deep-encoding finding from the Codex audit of commit `cb21423` has been reme
 | **Gate 2: Adapter Tests** | Bybit and Lighter adapters across all 6 fact types (`position`, `fill`, `funding`, `balance`, `equity`, `pnl`), malformed records, unknown route schemas, mixed recognized/unsupported batches. | `tests/test_reconcile_adapters.py`<br>- 5 test cases for Bybit and Lighter adapters. | **PASSED** (5/5) ✅ |
 | **Gate 3: CLI Smoke** | `motim reconcile`, `motim facts`, `motim issues` verifying stdout JSON format and exit codes `0`, `2`, `3`, `4`, including negative max age and non-GET method rejection. | `tests/test_reconcile_cli.py`<br>- 14 test cases covering CLI smoke and edge cases. | **PASSED** (14/14) ✅ |
 | **Gate 4: No-Network & No-Replay** | Static AST audit ensuring no network modules are imported in reconciliation code; subprocess execution under an active socket/DNS sabotaged guard; no request builders or replay mechanisms. | `tests/test_reconcile_no_network.py`<br>- 3 test cases auditing AST and running under active network sabotage guard. | **PASSED** (3/3) ✅ |
-| **Gate 5: Security Regression** | Ingestion of canary secret tokens across headers, cookies, query, body, duplicate-key bypass vectors, nested container structures (tuples, sets, frozensets), nested auth material key families (`signature`, `session_id`, `credentials`, `passphrase`), nested `nonce` variants, split-separator variants (`n_o_n_c_e`, `n-o-n-c-e`, `x-n-o-n-c-e`), credential-bearing route keys (`?api_key=...`, `?token=...`, userinfo `user:pass@...`), percent-encoded query keys (`api%5Fkey=...`), route fragments (`#api_key=...`), multi-layer deep percent-encoding (depths 6 to 20), UTF-16 payloads (with and without BOM), colon-separated generic text, and compressed/binary payloads; assert zero leaks in output JSON, stderr, or reports. | `tests/test_reconcile_security.py` & `tests/test_redaction.py`<br>- 106 security and redaction test cases asserting zero secret sentinel leaks. | **PASSED** (106/106) ✅ |
-| **Gate 6: Full Suite** | Full test suite regression green. | `pytest` running all 294 test cases across the entire repository. | **PASSED** (294/294) ✅ |
+| **Gate 5: Security Regression** | Ingestion of canary secret tokens across headers, cookies, query, body, duplicate-key bypass vectors, nested container structures (tuples, sets, frozensets), nested auth material key families (`signature`, `session_id`, `credentials`, `passphrase`), nested `nonce` variants, split-separator variants (`n_o_n_c_e`, `n-o-n-c-e`, `x-n-o-n-c-e`), credential-bearing route keys (`?api_key=...`, `?token=...`, userinfo `user:pass@...`), percent-encoded query keys (`api%5Fkey=...`), route fragments (`#api_key=...`), malformed percent sequences (`%GG`, `%G0`, `%0G`, `%`), multi-layer deep percent-encoding (depths 6 to 20), UTF-16 payloads (with and without BOM), colon-separated generic text, hostile size/depth inputs, and compressed/binary payloads; assert zero leaks in output JSON, stderr, or reports. | `tests/test_reconcile_security.py` & `tests/test_redaction.py`<br>- 122 security and redaction test cases asserting zero secret sentinel leaks. | **PASSED** (122/122) ✅ |
+| **Gate 6: Full Suite** | Full test suite regression green. | `pytest` running all 310 test cases across the entire repository. | **PASSED** (310/310) ✅ |
 
 ---
 
@@ -140,28 +148,28 @@ configfile: pyproject.toml
 testpaths: tests
 plugins: anyio-4.13.0, asyncio-1.3.0, timeout-2.4.0
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 294 items
+collected 310 items
 
-tests\test_auth.py .....................                                 [  7%]
+tests\test_auth.py .....................                                 [  6%]
 tests\test_cli.py .................                                      [ 12%]
-tests\test_client.py ..                                                  [ 13%]
-tests\test_config.py ............                                        [ 17%]
-tests\test_diff.py .                                                     [ 18%]
-tests\test_egress.py ........                                            [ 20%]
-tests\test_exchange_db.py .....                                          [ 22%]
-tests\test_exchange_writer.py .                                          [ 22%]
-tests\test_gates.py ..................                                   [ 28%]
-tests\test_linkfinder_integration.py ..                                  [ 29%]
-tests\test_reconcile_adapters.py .....                                   [ 31%]
-tests\test_reconcile_cli.py ..............                               [ 36%]
-tests\test_reconcile_contract.py .....................................   [ 48%]
-tests\test_reconcile_no_network.py ...                                   [ 49%]
-tests\test_reconcile_security.py ....................................... [ 62%]
-..................................................                       [ 79%]
-tests\test_redaction.py .................                                [ 85%]
-tests\test_service.py ........................                           [ 93%]
+tests\test_client.py ..                                                  [ 12%]
+tests\test_config.py ............                                        [ 16%]
+tests\test_diff.py .                                                     [ 17%]
+tests\test_egress.py ........                                            [ 19%]
+tests\test_exchange_db.py .....                                          [ 21%]
+tests\test_exchange_writer.py .                                          [ 21%]
+tests\test_gates.py ..................                                   [ 27%]
+tests\test_linkfinder_integration.py ..                                  [ 28%]
+tests\test_reconcile_adapters.py .....                                   [ 29%]
+tests\test_reconcile_cli.py ..............                               [ 34%]
+tests\test_reconcile_contract.py .....................................   [ 46%]
+tests\test_reconcile_no_network.py ...                                   [ 47%]
+tests\test_reconcile_security.py ....................................... [ 59%]
+.................................................................        [ 80%]
+tests\test_redaction.py ..................                               [ 86%]
+tests\test_service.py ........................                           [ 94%]
 tests\test_store.py ..................                                   [100%]
 
-============================= 294 passed in 7.07s =============================
+============================= 310 passed in 6.86s =============================
 ```
 

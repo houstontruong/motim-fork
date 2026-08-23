@@ -73,6 +73,11 @@ def parse_rfc3339_z(ts: str) -> datetime:
     return datetime.fromisoformat(ts[:-1] + "+00:00")
 
 
+MAX_DECODE_DEPTH = 10
+MAX_ROUTE_LENGTH = 1024
+MAX_FIELD_KEY_LENGTH = 512
+
+
 def _unquote_plus(s: Any) -> str:
     """Pure-Python URL unquoting without importing urllib (ensuring offline reconciliation contract)."""
     raw = str(s)
@@ -100,31 +105,20 @@ def _unquote_plus(s: Any) -> str:
 
 
 def _has_percent_encoding(s: str) -> bool:
-    """Check if string contains valid percent-encoded triples %XX."""
-    if "%" not in s:
-        return False
-    parts = s.split("%")
-    for p in parts[1:]:
-        if len(p) >= 2:
-            try:
-                int(p[:2], 16)
-                return True
-            except ValueError:
-                pass
-    return False
+    """Check if string contains any percent character."""
+    return "%" in s
 
 
-def _fully_unquote_plus(s: Any, max_rounds: int | None = None) -> str:
-    """Iteratively unquote percent-encoded characters until true fixpoint.
+def _fully_unquote_plus(s: Any, max_rounds: int = MAX_DECODE_DEPTH) -> str:
+    """Iteratively unquote percent-encoded characters up to a small constant depth cap.
 
-    A bounded decode limit derived from input length prevents runaway loops while
-    reliably resolving arbitrary multi-layer nested percent-encodings.
+    Prevents quadratic CPU cost on hostile input. If '%' remains after max_rounds,
+    it is treated as unresolved and suspicious by callers.
     """
     raw = str(s)
     if "%" not in raw and "+" not in raw:
         return raw
-    limit = max_rounds if max_rounds is not None else max(64, len(raw))
-    for _ in range(limit):
+    for _ in range(max_rounds):
         if "%" not in raw and "+" not in raw:
             break
         unq = _unquote_plus(raw)
@@ -135,20 +129,22 @@ def _fully_unquote_plus(s: Any, max_rounds: int | None = None) -> str:
 
 
 def _normalize_key_name(k: Any) -> str:
-    """Normalize a key name by iteratively unquoting percent-encoded characters, lowercasing, and stripping hyphens/underscores."""
+    """Normalize a key name by unquoting, lowercasing, and stripping hyphens, underscores, and percent signs."""
     s = _fully_unquote_plus(k)
-    return s.lower().replace("-", "").replace("_", "")
+    return s.lower().replace("-", "").replace("_", "").replace("%", "")
 
 
 def _is_auth_string(raw: str) -> bool:
     s_raw = raw.strip()
     if not s_raw:
         return False
+    if len(s_raw) > MAX_ROUTE_LENGTH:
+        return True
 
     s_unq = _fully_unquote_plus(s_raw).strip()
 
-    # Fail closed on unresolved percent encoding after bounded decode
-    if _has_percent_encoding(s_unq):
+    # Fail closed on any unresolved percent character (malformed %XX or depth > MAX_DECODE_DEPTH)
+    if "%" in s_unq or "%" in s_raw:
         return True
 
     # 1. Bearer / JWT on raw or iteratively decoded strings
@@ -262,6 +258,12 @@ def contains_auth_elements(val: Any) -> bool:
     """Recursively check for auth-shaped field names or secret values in a structure."""
     if isinstance(val, (dict, Mapping)):
         for k, v in val.items():
+            k_str = str(k)
+            if len(k_str) > MAX_FIELD_KEY_LENGTH:
+                return True
+            # Any percent character in a dictionary/header/payload key name is unresolved and suspicious
+            if "%" in k_str:
+                return True
             k_norm = _normalize_key_name(k)
             for pattern in AUTH_KEY_PATTERNS:
                 pat_norm = pattern.replace("-", "").replace("_", "")
@@ -317,10 +319,15 @@ def validate_sanitized_exchange(
     Returns the validated exchange dict on success.
     Raises ValidationError on violation.
     """
+    # 1. Type validation
     if not isinstance(exchange, dict):
-        raise ValidationError("Exchange record must be a JSON object")
+        raise ValidationError(
+            f"Exchange must be a dict, got {type(exchange).__name__}",
+            code="invalid_input",
+            exchange_id=None,
+        )
 
-    # 1. Secret / Auth Check
+    # 2. Secret / Auth Check
     if contains_auth_elements(exchange):
         ex_id = exchange.get("exchange_id") if isinstance(exchange.get("exchange_id"), str) else None
         raise ValidationError(
@@ -329,7 +336,7 @@ def validate_sanitized_exchange(
             exchange_id=ex_id,
         )
 
-    # 2. Non-Finite Numeric Check
+    # 3. Non-Finite Numeric Check
     if contains_non_finite_values(exchange):
         ex_id = exchange.get("exchange_id") if isinstance(exchange.get("exchange_id"), str) else None
         raise ValidationError(
@@ -338,12 +345,12 @@ def validate_sanitized_exchange(
             exchange_id=ex_id,
         )
 
-    # 2. Strict Mode Top-Level Keys
+    # 4. Strict Top-Level Keys Check
     if strict:
         unknown_keys = set(exchange.keys()) - ALLOWED_TOP_LEVEL_KEYS
         if unknown_keys:
             raise ValidationError(
-                f"Unknown top-level field(s) in strict mode: {sorted(unknown_keys)}",
+                f"Exchange contains forbidden or unknown top-level field(s): {sorted(unknown_keys)}",
                 code="invalid_input",
                 exchange_id=exchange.get("exchange_id"),
             )
@@ -441,6 +448,12 @@ def validate_sanitized_exchange(
     if not isinstance(route_key, str) or not route_key.strip():
         raise ValidationError(
             "Missing or invalid request.route_key",
+            code="invalid_input",
+            exchange_id=ex_id,
+        )
+    if len(route_key) > MAX_ROUTE_LENGTH:
+        raise ValidationError(
+            f"request.route_key exceeds maximum length of {MAX_ROUTE_LENGTH} characters",
             code="invalid_input",
             exchange_id=ex_id,
         )
