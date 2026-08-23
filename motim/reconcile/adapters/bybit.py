@@ -6,6 +6,7 @@ from typing import Any
 
 from motim.reconcile.decimal_util import normalize_asset, to_canonical_decimal_str
 from motim.reconcile.models import Fact, FactType, Issue, IssueCode, Severity
+from motim.reconcile.validator import _fully_unquote_plus
 from .base import AdapterResult, BaseAdapter
 
 SUPPORTED_ROUTES = frozenset(
@@ -27,7 +28,7 @@ class BybitAdapter(BaseAdapter):
         account_scope = exchange.get("account_scope") or "default"
 
         if not self.supports_route(route_key):
-            clean_route = route_key.split("?")[0].split("#")[0].split(";")[0].split("@")[-1]
+            clean_route = _fully_unquote_plus(route_key).split("?")[0].split("#")[0].split(";")[0].split("@")[-1].strip()
             return AdapterResult(
                 facts=[],
                 issues=[

@@ -112,5 +112,13 @@ Fix all three confidentiality findings with targeted regressions:
 2. **HIGH — Percent-encoded key bypass** (`motim/reconcile/validator.py`, `motim/redact.py`). URL-decode query/fragment field names before sensitivity checks, rejecting any input with percent-encoded auth keys (such as `api%5Fkey=...`) with `invalid_input`, zero facts, and no canary leaks.
 3. **MEDIUM — Fragment reflection** (`motim/reconcile/validator.py`, `adapters/bybit.py`, `adapters/lighter.py`). Inspect route `#` fragments for auth credentials during ingest validation and defensively strip `#` fragments, query parameters, and userinfo from unsupported route issue messages.
 
+## Round 9 — Confidentiality Remediation
+
+Fix both confidentiality findings with targeted regressions:
+
+1. **HIGH — Fully percent-encoded structural delimiters can leak** (`motim/reconcile/validator.py`, `adapters/bybit.py`, `adapters/lighter.py`). Iteratively decode complete routes and segments before auth parsing to reject routes with encoded delimiters (e.g., `unsupported%3Fapi%5Fkey%3DTOPSECRET` or `unsupported%23token%3DTOPSECRET`) with `invalid_input` and zero facts, and defensively strip decoded structural delimiters from unsupported route messages.
+2. **HIGH — BOM-less UTF-16/NUL-bearing body data can leak** (`motim/redact.py`). Detect NUL bytes and binary characteristics before plain text UTF-8 fallback; decode BOM-less UTF-16LE/BE via byte heuristics, sanitize credentials, and fail closed on arbitrary NUL-bearing binary payloads (`b"[REDACTED: unparseable binary body]"`).
+
+
 
 

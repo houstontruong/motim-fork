@@ -653,3 +653,149 @@ def test_persistence_path_utf16_colon_and_binary_redaction(tmp_path: Path):
         db.close()
 
 
+def test_redactor_bomless_utf16_and_nul_handling():
+    """Verify Redactor.redact_body_bytes() handles BOM-less UTF-16LE/BE and fails closed on NUL-bearing binary."""
+    redactor = Redactor(profile="strict")
+
+    # 1. BOM-less UTF-16LE with missing content type (None)
+    canary_le_none = "CANARY_BOMLESS_LE_NONE_1122"
+    raw_le_none = f"password: {canary_le_none}".encode("utf-16-le")
+    r_le_none = redactor.redact_body_bytes(raw_le_none, None)
+    assert r_le_none is not None
+    assert canary_le_none.encode("utf-8") not in r_le_none
+    assert canary_le_none.encode("utf-16-le") not in r_le_none
+    decoded_le = r_le_none.decode("utf-16-le")
+    assert "[REDACTED]" in decoded_le
+
+    # 2. BOM-less UTF-16LE with generic content type (text/plain and application/octet-stream)
+    canary_le_plain = "CANARY_BOMLESS_LE_PLAIN_3344"
+    raw_le_plain = f'api_key: "{canary_le_plain}"\nuser: alice'.encode("utf-16-le")
+    r_le_plain = redactor.redact_body_bytes(raw_le_plain, "text/plain")
+    assert r_le_plain is not None
+    assert canary_le_plain.encode("utf-8") not in r_le_plain
+    assert canary_le_plain.encode("utf-16-le") not in r_le_plain
+    decoded_le_plain = r_le_plain.decode("utf-16-le")
+    assert '[REDACTED]' in decoded_le_plain
+    assert "user: alice" in decoded_le_plain
+
+    # 3. BOM-less UTF-16BE with missing content type (None)
+    canary_be_none = "CANARY_BOMLESS_BE_NONE_5566"
+    raw_be_none = f"secret: {canary_be_none}".encode("utf-16-be")
+    r_be_none = redactor.redact_body_bytes(raw_be_none, None)
+    assert r_be_none is not None
+    assert canary_be_none.encode("utf-8") not in r_be_none
+    assert canary_be_none.encode("utf-16-be") not in r_be_none
+    decoded_be = r_be_none.decode("utf-16-be")
+    assert "[REDACTED]" in decoded_be
+
+    # 4. BOM-less UTF-16BE with generic content type (application/octet-stream)
+    canary_be_octet = "CANARY_BOMLESS_BE_OCTET_7788"
+    raw_be_octet = f"token: '{canary_be_octet}'\nstatus: ok".encode("utf-16-be")
+    r_be_octet = redactor.redact_body_bytes(raw_be_octet, "application/octet-stream")
+    assert r_be_octet is not None
+    assert canary_be_octet.encode("utf-8") not in r_be_octet
+    assert canary_be_octet.encode("utf-16-be") not in r_be_octet
+    decoded_be_octet = r_be_octet.decode("utf-16-be")
+    assert "[REDACTED]" in decoded_be_octet
+    assert "status: ok" in decoded_be_octet
+
+    # 5. Benign BOM-less UTF-16LE / UTF-16BE content preservation
+    benign_le = "status: ok\ncount: 10".encode("utf-16-le")
+    r_benign_le = redactor.redact_body_bytes(benign_le, None)
+    assert r_benign_le is not None
+    assert r_benign_le.decode("utf-16-le") == "status: ok\ncount: 10"
+
+    benign_be = "status: ok\ncount: 10".encode("utf-16-be")
+    r_benign_be = redactor.redact_body_bytes(benign_be, "text/plain")
+    assert r_benign_be is not None
+    assert r_benign_be.decode("utf-16-be") == "status: ok\ncount: 10"
+
+    # 6. Arbitrary NUL-bearing non-UTF-16 binary data: fails closed
+    canary_bin_nul = "CANARY_NUL_BINARY_SECRET_9900"
+    raw_bin_nul = b"\x00\x01\x02\x03\x00\xff" + canary_bin_nul.encode("utf-8") + b"\x00\x00\xfe"
+    r_bin_nul = redactor.redact_body_bytes(raw_bin_nul, None)
+    assert r_bin_nul == b"[REDACTED: unparseable binary body]"
+    assert canary_bin_nul.encode("utf-8") not in r_bin_nul
+
+
+def test_persistence_path_bomless_utf16_redaction(tmp_path: Path):
+    """Verify ExchangeDB persistence sanitizes BOM-less UTF-16LE/BE and NUL binary payloads."""
+    db_path = tmp_path / "motim_bomless_persist.sqlite3"
+    db = ExchangeDB(db_path)
+
+    canary_le = "CANARY_PERSIST_BOMLESS_LE_1133"
+    canary_be = "CANARY_PERSIST_BOMLESS_BE_3355"
+    canary_bin = "CANARY_PERSIST_NUL_BIN_5577"
+
+    try:
+        # 1. BOM-less UTF-16LE with None content-type
+        body_le = f"password: {canary_le}".encode("utf-16-le")
+        db.put_exchange(
+            scheme="https",
+            host="api.example.com",
+            port=443,
+            method="POST",
+            path="/v1/le",
+            query=None,
+            url="https://api.example.com/v1/le",
+            status=200,
+            req_body=body_le,
+            req_content_type=None,
+        )
+
+        # 2. BOM-less UTF-16BE with text/plain content-type
+        body_be = f"user: alice\napi_key: {canary_be}".encode("utf-16-be")
+        db.put_exchange(
+            scheme="https",
+            host="api.example.com",
+            port=443,
+            method="POST",
+            path="/v1/be",
+            query=None,
+            url="https://api.example.com/v1/be",
+            status=200,
+            req_body=body_be,
+            req_content_type="text/plain",
+        )
+
+        # 3. NUL-bearing binary with application/octet-stream
+        body_bin = b"\x00\x01\x02\x03\x00\xff" + canary_bin.encode("utf-8") + b"\x00\x00\xfe"
+        db.put_exchange(
+            scheme="https",
+            host="api.example.com",
+            port=443,
+            method="POST",
+            path="/v1/bin",
+            query=None,
+            url="https://api.example.com/v1/bin",
+            status=200,
+            req_body=body_bin,
+            req_content_type="application/octet-stream",
+        )
+
+        # Verify all exchanges in database
+        for ex_id in (1, 2, 3):
+            ex = db.get_exchange(ex_id)
+            assert ex is not None
+            req_body = ex["bodies"]["request"]
+            assert req_body is not None
+
+            for canary in (canary_le, canary_be, canary_bin):
+                assert canary.encode("utf-8") not in req_body
+                assert canary.encode("utf-16") not in req_body
+                assert canary.encode("utf-16-le") not in req_body
+                assert canary.encode("utf-16-be") not in req_body
+
+        # Assert no canary strings in entire SQLite file
+        db_bytes = db_path.read_bytes()
+        for canary in (canary_le, canary_be, canary_bin):
+            assert canary.encode("utf-8") not in db_bytes
+            assert canary.encode("utf-16") not in db_bytes
+            assert canary.encode("utf-16-le") not in db_bytes
+            assert canary.encode("utf-16-be") not in db_bytes
+
+    finally:
+        db.close()
+
+
+

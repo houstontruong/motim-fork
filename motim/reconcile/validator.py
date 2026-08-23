@@ -99,38 +99,39 @@ def _unquote_plus(s: Any) -> str:
     return res.decode("utf-8", errors="replace")
 
 
+def _fully_unquote_plus(s: Any, max_rounds: int = 5) -> str:
+    """Iteratively unquote percent-encoded characters until fixpoint."""
+    raw = str(s)
+    for _ in range(max_rounds):
+        if "%" not in raw and "+" not in raw:
+            break
+        unq = _unquote_plus(raw)
+        if unq == raw:
+            break
+        raw = unq
+    return raw
+
+
 def _normalize_key_name(k: Any) -> str:
-    """Normalize a key name by unquoting percent-encoded characters, lowercasing, and stripping hyphens/underscores."""
-    s = str(k)
-    try:
-        for _ in range(3):
-            unq = _unquote_plus(s)
-            if unq == s:
-                break
-            s = unq
-    except Exception:
-        pass
+    """Normalize a key name by iteratively unquoting percent-encoded characters, lowercasing, and stripping hyphens/underscores."""
+    s = _fully_unquote_plus(k)
     return s.lower().replace("-", "").replace("_", "")
 
 
 def _is_auth_string(raw: str) -> bool:
-    s = raw.strip()
-    if not s:
+    s_raw = raw.strip()
+    if not s_raw:
         return False
-    if BEARER_PATTERN.search(s) or JWT_PATTERN.search(s):
-        return True
 
-    # Check unquoted raw string for Bearer or JWT
-    try:
-        s_unq = _unquote_plus(s)
-        if BEARER_PATTERN.search(s_unq) or JWT_PATTERN.search(s_unq):
+    s_unq = _fully_unquote_plus(s_raw).strip()
+
+    # 1. Bearer / JWT on raw or iteratively decoded strings
+    for candidate in (s_raw, s_unq):
+        if BEARER_PATTERN.search(candidate) or JWT_PATTERN.search(candidate):
             return True
-    except Exception:
-        s_unq = s
 
-    s_lower = s.lower()
-    s_unq_lower = s_unq.lower()
-    for text_to_check in (s_lower, s_unq_lower):
+    # 2. Canary checks across raw and decoded forms
+    for text_to_check in (s_raw.lower(), s_unq.lower()):
         if "canary" in text_to_check and any(
             kw in text_to_check
             for kw in (
@@ -148,41 +149,38 @@ def _is_auth_string(raw: str) -> bool:
         ):
             return True
 
-    # Check for URL userinfo credentials (e.g. user:pass@host or token@host or api%5Fkey@host)
-    if "@" in s or "@" in s_unq:
-        target = s_unq if "@" in s_unq else s
-        prefix = target.split("@", 1)[0]
-        userinfo = prefix.split("://")[-1].split("/")[-1]
-        if userinfo:
-            userinfo_norm = _normalize_key_name(userinfo)
-            if ":" in userinfo:
-                return True
-            for pattern in AUTH_KEY_PATTERNS:
-                pat_norm = pattern.replace("-", "").replace("_", "")
-                if pat_norm in userinfo_norm:
+    # 3. Check for URL userinfo credentials (e.g. user:pass@host or token@host or api%5Fkey@host)
+    for candidate in (s_raw, s_unq):
+        if "@" in candidate:
+            prefix = candidate.split("@", 1)[0]
+            userinfo = prefix.split("://")[-1].split("/")[-1]
+            if userinfo:
+                userinfo_norm = _normalize_key_name(userinfo)
+                if ":" in userinfo:
                     return True
+                for pattern in AUTH_KEY_PATTERNS:
+                    pat_norm = pattern.replace("-", "").replace("_", "")
+                    if pat_norm in userinfo_norm:
+                        return True
 
-    # Check for URL query / form-shaped / fragment credentials
+    # 4. Check for URL query / form-shaped / fragment credentials across raw and fully unquoted strings
     segments_to_check: list[str] = []
+    for candidate in (s_raw, s_unq):
+        if "?" in candidate:
+            q_part = candidate.split("?", 1)[1]
+            if "#" in q_part:
+                q_core, frag = q_part.split("#", 1)
+                segments_to_check.append(q_core)
+                segments_to_check.append(frag)
+            else:
+                segments_to_check.append(q_part)
 
-    # 1. Query part
-    if "?" in s:
-        q_part = s.split("?", 1)[1]
-        if "#" in q_part:
-            q_core, frag = q_part.split("#", 1)
-            segments_to_check.append(q_core)
+        if "#" in candidate and not ("?" in candidate and "#" in candidate.split("?", 1)[1]):
+            frag = candidate.split("#", 1)[1]
             segments_to_check.append(frag)
-        else:
-            segments_to_check.append(q_part)
 
-    # 2. Fragment part if not preceded by ? (e.g. positions#api_key=SECRET)
-    if "#" in s and not ("?" in s and "#" in s.split("?", 1)[1]):
-        frag = s.split("#", 1)[1]
-        segments_to_check.append(frag)
-
-    # 3. If no ? or #, check the entire string if it contains =
-    if not segments_to_check and "=" in s:
-        segments_to_check.append(s)
+        if "=" in candidate:
+            segments_to_check.append(candidate)
 
     for segment in segments_to_check:
         if "=" in segment:
@@ -194,7 +192,7 @@ def _is_auth_string(raw: str) -> bool:
                     pat_norm = pattern.replace("-", "").replace("_", "")
                     if pat_norm in k_norm:
                         return True
-                v_unq = _unquote_plus(v) if v else ""
+                v_unq = _fully_unquote_plus(v) if v else ""
                 for val_check in (v, v_unq):
                     if val_check and (
                         BEARER_PATTERN.search(val_check)
@@ -225,7 +223,7 @@ def _is_auth_string(raw: str) -> bool:
                 pat_norm = pattern.replace("-", "").replace("_", "")
                 if pat_norm in seg_norm:
                     return True
-            seg_unq = _unquote_plus(segment)
+            seg_unq = _fully_unquote_plus(segment)
             if BEARER_PATTERN.search(seg_unq) or JWT_PATTERN.search(seg_unq) or (
                 "canary" in seg_unq.lower() and any(kw in seg_unq.lower() for kw in ("token", "secret", "key", "auth", "nonce"))
             ):

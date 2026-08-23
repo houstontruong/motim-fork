@@ -500,8 +500,10 @@ class TestGate5SecurityRegression:
 
         canary_frag_1 = "CANARY_ADAPTER_FRAG_SECRET_1122"
         canary_frag_2 = "CANARY_ADAPTER_FRAG_SECRET_3344"
+        canary_enc_1 = "CANARY_ADAPTER_ENC_SECRET_5566"
+        canary_enc_2 = "CANARY_ADAPTER_ENC_SECRET_7788"
 
-        # 1. Bybit adapter unsupported route with fragment
+        # 1. Bybit adapter unsupported route with literal fragment
         bybit_exchange = {
             "exchange_id": "bybit-unsupp-001",
             "captured_at": "2026-08-23T14:00:00Z",
@@ -514,7 +516,7 @@ class TestGate5SecurityRegression:
         assert canary_frag_1 not in res_bybit.issues[0].message
         assert res_bybit.issues[0].message == "Bybit route 'unsupported_route' is not supported"
 
-        # 2. Lighter adapter unsupported route with fragment
+        # 2. Lighter adapter unsupported route with literal fragment
         lighter_exchange = {
             "exchange_id": "lighter-unsupp-001",
             "captured_at": "2026-08-23T14:00:00Z",
@@ -526,6 +528,113 @@ class TestGate5SecurityRegression:
         assert len(res_lighter.issues) == 1
         assert canary_frag_2 not in res_lighter.issues[0].message
         assert res_lighter.issues[0].message == "Lighter route 'unsupported_route' is not supported"
+
+        # 3. Bybit adapter unsupported route with fully percent-encoded query delimiter
+        bybit_enc_exchange = {
+            "exchange_id": "bybit-unsupp-002",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": f"unsupported_route%3Fapi%5Fkey%3D{canary_enc_1}"},
+            "response": {"status": 200, "body": {}},
+        }
+        res_bybit_enc = bybit.reconcile_exchange(bybit_enc_exchange)
+        assert not res_bybit_enc.is_supported
+        assert len(res_bybit_enc.issues) == 1
+        assert canary_enc_1 not in res_bybit_enc.issues[0].message
+        assert res_bybit_enc.issues[0].message == "Bybit route 'unsupported_route' is not supported"
+
+        # 4. Lighter adapter unsupported route with fully percent-encoded fragment delimiter
+        lighter_enc_exchange = {
+            "exchange_id": "lighter-unsupp-002",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": f"unsupported_route%23token%3D{canary_enc_2}"},
+            "response": {"status": 200, "body": {}},
+        }
+        res_lighter_enc = lighter.reconcile_exchange(lighter_enc_exchange)
+        assert not res_lighter_enc.is_supported
+        assert len(res_lighter_enc.issues) == 1
+        assert canary_enc_2 not in res_lighter_enc.issues[0].message
+        assert res_lighter_enc.issues[0].message == "Lighter route 'unsupported_route' is not supported"
+
+    @pytest.mark.parametrize(
+        "provider,route_key,sentinel",
+        [
+            # Fully percent-encoded query delimiters (? -> %3F, = -> %3D)
+            ("bybit", "unsupported%3Fapi%5Fkey%3DTOPSECRET_CANARY_1", "TOPSECRET_CANARY_1"),
+            ("bybit", "unsupported%3fapi%5fkey%3dTOPSECRET_CANARY_2", "TOPSECRET_CANARY_2"),
+            ("bybit", "positions%3Fapi%5Fkey%3DTOPSECRET_CANARY_3", "TOPSECRET_CANARY_3"),
+            ("bybit", "positions%3Ftoken%3DTOPSECRET_CANARY_4", "TOPSECRET_CANARY_4"),
+            ("bybit", "unsupported%3Fsecret%3DTOPSECRET_CANARY_5", "TOPSECRET_CANARY_5"),
+            ("bybit", "unsupported%3Fn_o_n_c_e%3DTOPSECRET_CANARY_6", "TOPSECRET_CANARY_6"),
+            ("bybit", "unsupported%3F%61%70%69%5f%6b%65%79%3dTOPSECRET_CANARY_7", "TOPSECRET_CANARY_7"),
+            # Double percent-encoded query delimiters (? -> %253F, = -> %253D)
+            ("bybit", "unsupported%253Fapi%255Fkey%253DTOPSECRET_CANARY_8", "TOPSECRET_CANARY_8"),
+            # Fully percent-encoded fragment delimiters (# -> %23, = -> %3D)
+            ("bybit", "unsupported%23token%3DTOPSECRET_CANARY_9", "TOPSECRET_CANARY_9"),
+            ("bybit", "unsupported%23api%5Fkey%3DTOPSECRET_CANARY_10", "TOPSECRET_CANARY_10"),
+            ("bybit", "positions%23secret%3DTOPSECRET_CANARY_11", "TOPSECRET_CANARY_11"),
+            ("bybit", "positions%23n%2do%2dn%2dc%2de%3DTOPSECRET_CANARY_12", "TOPSECRET_CANARY_12"),
+            # Lighter provider fully percent-encoded query and fragment delimiters
+            ("lighter", "trades%3Fapi%5Fkey%3DTOPSECRET_LIGHTER_1", "TOPSECRET_LIGHTER_1"),
+            ("lighter", "account_positions%23token%3DTOPSECRET_LIGHTER_2", "TOPSECRET_LIGHTER_2"),
+            ("lighter", "unsupported%3Fsecret%3DTOPSECRET_LIGHTER_3", "TOPSECRET_LIGHTER_3"),
+            ("lighter", "unsupported%23password%3DTOPSECRET_LIGHTER_4", "TOPSECRET_LIGHTER_4"),
+            ("lighter", "account%3F%73%65%63%72%65%74%3dTOPSECRET_LIGHTER_5", "TOPSECRET_LIGHTER_5"),
+            ("lighter", "unsupported%253Ftoken%253DTOPSECRET_LIGHTER_6", "TOPSECRET_LIGHTER_6"),
+        ],
+    )
+    def test_fully_percent_encoded_structural_delimiters_rejected_with_zero_facts(
+        self, provider: str, route_key: str, sentinel: str, tmp_path: Path
+    ):
+        """Fully percent-encoded structural delimiters (? -> %3F, # -> %23, = -> %3D) are rejected with invalid_input and zero facts."""
+        body_content = (
+            {"result": {"list": [{"symbol": "BTCUSDT", "side": "Buy", "size": "1.0", "entryPrice": "50000", "markPrice": "50500"}]}}
+            if provider == "bybit"
+            else {"code": 200, "data": {"positions": [{"market_id": "BTC", "side": "LONG", "size": "1.0", "entry_price": "50000", "mark_price": "50500"}]}}
+        )
+        record = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": f"enc-delims-{provider}-001",
+            "provider": provider,
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": route_key},
+            "response": {
+                "status": 200,
+                "body": body_content,
+            },
+        }
+
+        # 1. Direct Python API
+        res_api = reconcile([record], provider, as_of="2026-08-23T14:05:00Z")
+        assert res_api.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_api.facts) == 0
+        assert len(res_api.issues) >= 1
+        res_json = json.dumps(res_api.to_dict())
+        assert sentinel not in res_json
+        for issue in res_api.issues:
+            assert sentinel not in issue.message
+            assert "[REDACTED]" in issue.message or "auth" in issue.message.lower()
+
+        # 2. JSONL string API
+        raw_jsonl = json.dumps(record) + "\n"
+        res_jsonl = reconcile(raw_jsonl, provider, as_of="2026-08-23T14:05:00Z")
+        assert res_jsonl.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_jsonl.facts) == 0
+        assert sentinel not in json.dumps(res_jsonl.to_dict())
+
+        # 3. CLI execution
+        fixture_file = tmp_path / f"enc_delims_{provider}.jsonl"
+        fixture_file.write_text(raw_jsonl, encoding="utf-8")
+        runner = CliRunner()
+        cli_res = runner.invoke(
+            cli,
+            ["reconcile", "--input", str(fixture_file), "--provider", provider, "--as-of", "2026-08-23T14:05:00Z"],
+        )
+        assert cli_res.exit_code == 4
+        assert sentinel not in cli_res.output
+        cli_out = json.loads(cli_res.output)
+        assert cli_out["outcome"] == "invalid_input"
+        assert len(cli_out["facts"]) == 0
+
 
 
 

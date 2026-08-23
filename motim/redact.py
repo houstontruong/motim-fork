@@ -543,7 +543,36 @@ class Redactor:
             except Exception:
                 return b"[REDACTED: unparseable binary body]"
 
-        # 4. Try JSON parsing
+        # 4. Detect BOM-less UTF-16 or fail-closed on NUL-bearing binary payloads
+        if b"\x00" in body_bytes:
+            if len(body_bytes) >= 2 and len(body_bytes) % 2 == 0:
+                nul_odd = sum(1 for b in body_bytes[1::2] if b == 0)
+                nul_even = sum(1 for b in body_bytes[0::2] if b == 0)
+
+                # UTF-16LE heuristic (NUL bytes on odd byte positions for ASCII range)
+                if nul_odd > 0 and (nul_even == 0 or nul_odd > nul_even * 2):
+                    try:
+                        decoded = body_bytes.decode("utf-16-le")
+                        if decoded and all(c.isprintable() or c in "\r\n\t" for c in decoded):
+                            redacted_text = self._redact_plain_text(decoded)
+                            return redacted_text.encode("utf-16-le")
+                    except Exception:
+                        pass
+
+                # UTF-16BE heuristic (NUL bytes on even byte positions for ASCII range)
+                if nul_even > 0 and (nul_odd == 0 or nul_even > nul_odd * 2):
+                    try:
+                        decoded = body_bytes.decode("utf-16-be")
+                        if decoded and all(c.isprintable() or c in "\r\n\t" for c in decoded):
+                            redacted_text = self._redact_plain_text(decoded)
+                            return redacted_text.encode("utf-16-be")
+                    except Exception:
+                        pass
+
+            # NUL-bearing non-UTF-16 or unparseable binary: fail closed
+            return b"[REDACTED: unparseable binary body]"
+
+        # 5. Try JSON parsing
         if "json" in ct or body_bytes.strip().startswith((b"{", b"[")):
             try:
                 decoded = body_bytes.decode("utf-8")
@@ -554,7 +583,7 @@ class Redactor:
                 if "json" in ct:
                     return b'{"_redacted": "[REDACTED: unparseable json body]"}'
 
-        # 5. Form-urlencoded (explicit content-type)
+        # 6. Form-urlencoded (explicit content-type)
         if "x-www-form-urlencoded" in ct:
             try:
                 decoded = body_bytes.decode("utf-8")
@@ -564,7 +593,7 @@ class Redactor:
             except Exception:
                 return b"_redacted=[REDACTED: unparseable form]"
 
-        # 6. Known code / markup text content types: sanitize with regex / structural rules
+        # 7. Known code / markup text content types: sanitize with regex / structural rules
         if any(t in ct for t in ("javascript", "xml", "html", "yaml", "css")):
             try:
                 text = body_bytes.decode("utf-8", errors="replace")
@@ -574,7 +603,7 @@ class Redactor:
             except Exception:
                 return b"[REDACTED: unparseable text body]"
 
-        # 7. General fallback for UTF-8 decodable plain text
+        # 8. General fallback for UTF-8 decodable plain text
         try:
             text = body_bytes.decode("utf-8")
             redacted_text = self._redact_plain_text(text)
@@ -582,7 +611,7 @@ class Redactor:
         except UnicodeDecodeError:
             pass
 
-        # 8. Unparseable binary or unsupported encoding: fail closed
+        # 9. Unparseable binary or unsupported encoding: fail closed
         return b"[REDACTED: unparseable binary body]"
 
     def redact_flow_payload(self, p: dict[str, Any]) -> dict[str, Any]:
