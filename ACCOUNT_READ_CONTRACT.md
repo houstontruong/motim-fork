@@ -47,7 +47,7 @@ Input is formatted as **JSON Lines (`.jsonl`)** where each line represents one v
 - `provider` *(string, required)*: Exactly `"bybit"` or `"lighter"`.
 - `captured_at` *(string, required)*: RFC3339 UTC timestamp ending with `"Z"` (e.g. `2026-08-23T14:00:00Z`).
 - `request.method` *(string, required)*: Normalized HTTP method string. Only `"GET"` is accepted for account-read reconciliation; mutating methods (`POST`, `PUT`, `PATCH`, `DELETE`) are rejected with `invalid_input`.
-- `request.route_key` *(string, required)*: Synthetic adapter route key (e.g. `"positions"`, `"fills"`, `"wallet_balance"`, `"funding_history"`, `"closed_pnl"`).
+- `request.route_key` *(string, required)*: Synthetic adapter route key (e.g. `"positions"`, `"fills"`, `"wallet_balance"`, `"funding_history"`, `"closed_pnl"`). Any credential-bearing URL, userinfo, or query material in `route_key` is strictly rejected at ingest (`auth_field_detected` / `invalid_input`) with zero facts and redacted errors.
 - `response.status` *(integer, required)*: HTTP response status code (e.g. `200`).
 - `response.body` *(JSON object/array, required)*: Pre-sanitized response body payload.
 

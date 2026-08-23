@@ -337,4 +337,79 @@ class TestGate5SecurityRegression:
         assert cli_out["outcome"] == "invalid_input"
         assert len(cli_out["facts"]) == 0
 
+    @pytest.mark.parametrize(
+        "route_key,sentinel",
+        [
+            ("positions?api_key=CANARY_ROUTE_APIKEY_1122", "CANARY_ROUTE_APIKEY_1122"),
+            ("positions?token=CANARY_ROUTE_TOKEN_3344", "CANARY_ROUTE_TOKEN_3344"),
+            ("positions?secret=CANARY_ROUTE_SECRET_5566", "CANARY_ROUTE_SECRET_5566"),
+            ("positions?password=CANARY_ROUTE_PASSWORD_7788", "CANARY_ROUTE_PASSWORD_7788"),
+            ("positions?n_o_n_c_e=CANARY_ROUTE_NONCE_9900", "CANARY_ROUTE_NONCE_9900"),
+            ("positions?n-o-n-c-e=CANARY_ROUTE_HYPHEN_NONCE_1234", "CANARY_ROUTE_HYPHEN_NONCE_1234"),
+            ("https://user:CANARY_ROUTE_USERINFO_1234@bybit.com/positions", "CANARY_ROUTE_USERINFO_1234"),
+            ("https://CANARY_ROUTE_APIKEY_5678@bybit.com/positions", "CANARY_ROUTE_APIKEY_5678"),
+            ("positions?authorization=CANARY_ROUTE_AUTH_9012", "CANARY_ROUTE_AUTH_9012"),
+            ("positions?session_id=CANARY_ROUTE_SESSION_3456", "CANARY_ROUTE_SESSION_3456"),
+            ("positions?signature=CANARY_ROUTE_SIG_7890", "CANARY_ROUTE_SIG_7890"),
+        ],
+    )
+    def test_credential_bearing_route_keys_rejected_with_zero_facts(self, route_key: str, sentinel: str, tmp_path: Path):
+        """Credential-bearing URL/userinfo/query route keys are rejected at ingest with zero facts and redacted errors."""
+        record = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": "route-cred-test-001",
+            "provider": "bybit",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": route_key},
+            "response": {
+                "status": 200,
+                "body": {
+                    "result": {
+                        "list": [
+                            {
+                                "symbol": "BTCUSDT",
+                                "side": "Buy",
+                                "size": "1.0",
+                                "entryPrice": "50000",
+                                "markPrice": "50500",
+                            }
+                        ]
+                    }
+                },
+            },
+        }
+
+        # 1. Direct Python API
+        res = reconcile([record], "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res.outcome == Outcome.INVALID_INPUT.value
+        assert len(res.facts) == 0
+        assert len(res.issues) >= 1
+        res_json = json.dumps(res.to_dict())
+        assert sentinel not in res_json
+        for issue in res.issues:
+            assert sentinel not in issue.message
+            assert "[REDACTED]" in issue.message or "auth" in issue.message.lower()
+
+        # 2. JSONL string API
+        raw_jsonl = json.dumps(record) + "\n"
+        res_jsonl = reconcile(raw_jsonl, "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res_jsonl.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_jsonl.facts) == 0
+        assert sentinel not in json.dumps(res_jsonl.to_dict())
+
+        # 3. CLI execution via file
+        fixture_file = tmp_path / "route_cred.jsonl"
+        fixture_file.write_text(raw_jsonl, encoding="utf-8")
+        runner = CliRunner()
+        cli_res = runner.invoke(
+            cli,
+            ["reconcile", "--input", str(fixture_file), "--provider", "bybit", "--as-of", "2026-08-23T14:05:00Z"],
+        )
+        assert cli_res.exit_code == 4
+        assert sentinel not in cli_res.output
+        cli_out = json.loads(cli_res.output)
+        assert cli_out["outcome"] == "invalid_input"
+        assert len(cli_out["facts"]) == 0
+
+
 

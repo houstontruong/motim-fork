@@ -27,6 +27,7 @@ class BybitAdapter(BaseAdapter):
         account_scope = exchange.get("account_scope") or "default"
 
         if not self.supports_route(route_key):
+            clean_route = route_key.split("?")[0].split("@")[-1]
             return AdapterResult(
                 facts=[],
                 issues=[
@@ -35,7 +36,7 @@ class BybitAdapter(BaseAdapter):
                         provider=self.provider,
                         source_exchange_id=ex_id,
                         severity=Severity.WARNING.value,
-                        message=f"Bybit route '{route_key}' is not supported",
+                        message=f"Bybit route '{clean_route}' is not supported",
                     )
                 ],
                 is_supported=False,

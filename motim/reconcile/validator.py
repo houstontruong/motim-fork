@@ -41,8 +41,8 @@ AUTH_KEY_PATTERNS = (
 )
 
 # JWT / Canary / Secret value patterns
-BEARER_PATTERN = re.compile(r"^Bearer\s+[A-Za-z0-9._~+/-]+=*", re.IGNORECASE)
-JWT_PATTERN = re.compile(r"^ey[A-Za-z0-9_-]{6,}\.ey[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}")
+BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*")
+JWT_PATTERN = re.compile(r"ey[A-Za-z0-9_-]{6,}\.ey[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}")
 
 ALLOWED_TOP_LEVEL_KEYS = frozenset(
     {"schema_version", "exchange_id", "provider", "captured_at", "request", "response"}
@@ -73,6 +73,83 @@ def parse_rfc3339_z(ts: str) -> datetime:
     return datetime.fromisoformat(ts[:-1] + "+00:00")
 
 
+def _is_auth_string(raw: str) -> bool:
+    s = raw.strip()
+    if not s:
+        return False
+    if BEARER_PATTERN.search(s) or JWT_PATTERN.search(s):
+        return True
+
+    s_lower = s.lower()
+    if "canary" in s_lower and any(
+        kw in s_lower
+        for kw in (
+            "token",
+            "secret",
+            "cookie",
+            "key",
+            "signature",
+            "session",
+            "credential",
+            "passphrase",
+            "auth",
+            "nonce",
+        )
+    ):
+        return True
+
+    # Check for URL userinfo credentials (e.g. user:pass@host or token@host)
+    if "@" in s:
+        prefix = s.split("@", 1)[0]
+        userinfo = prefix.split("://")[-1].split("/")[-1]
+        if userinfo:
+            userinfo_norm = userinfo.lower().replace("-", "").replace("_", "")
+            if ":" in userinfo:
+                return True
+            for pattern in AUTH_KEY_PATTERNS:
+                pat_norm = pattern.replace("-", "").replace("_", "")
+                if pat_norm in userinfo_norm:
+                    return True
+
+    # Check for URL query / form-shaped credentials (e.g. ?api_key=... or token=... or secret=...)
+    query_str = s.split("?", 1)[1] if "?" in s else s
+    query_core = query_str.split("#", 1)[0]
+    if "=" in query_core:
+        pairs = [p for p in query_core.replace(";", "&").split("&") if "=" in p]
+        for pair in pairs:
+            k, _, v = pair.partition("=")
+            k_norm = k.strip().lower().replace("-", "").replace("_", "")
+            for pattern in AUTH_KEY_PATTERNS:
+                pat_norm = pattern.replace("-", "").replace("_", "")
+                if pat_norm in k_norm:
+                    return True
+            if v and (
+                BEARER_PATTERN.search(v)
+                or JWT_PATTERN.search(v)
+                or (
+                    "canary" in v.lower()
+                    and any(
+                        kw in v.lower()
+                        for kw in (
+                            "token",
+                            "secret",
+                            "cookie",
+                            "key",
+                            "signature",
+                            "session",
+                            "credential",
+                            "passphrase",
+                            "auth",
+                            "nonce",
+                        )
+                    )
+                )
+            ):
+                return True
+
+    return False
+
+
 def contains_auth_elements(val: Any) -> bool:
     """Recursively check for auth-shaped field names or secret values in a structure."""
     if isinstance(val, (dict, Mapping)):
@@ -91,48 +168,12 @@ def contains_auth_elements(val: Any) -> bool:
     elif isinstance(val, (bytes, bytearray)):
         try:
             s = val.decode("utf-8", errors="replace").strip()
-            if BEARER_PATTERN.match(s) or JWT_PATTERN.match(s):
-                return True
-            s_lower = s.lower()
-            if "canary" in s_lower and any(
-                kw in s_lower
-                for kw in (
-                    "token",
-                    "secret",
-                    "cookie",
-                    "key",
-                    "signature",
-                    "session",
-                    "credential",
-                    "passphrase",
-                    "auth",
-                    "nonce",
-                )
-            ):
+            if _is_auth_string(s):
                 return True
         except Exception:
             pass
     elif isinstance(val, str):
-        s = val.strip()
-        if BEARER_PATTERN.match(s) or JWT_PATTERN.match(s):
-            return True
-        # Check for canary tokens or explicit secret patterns
-        s_lower = s.lower()
-        if "canary" in s_lower and any(
-            kw in s_lower
-            for kw in (
-                "token",
-                "secret",
-                "cookie",
-                "key",
-                "signature",
-                "session",
-                "credential",
-                "passphrase",
-                "auth",
-                "nonce",
-            )
-        ):
+        if _is_auth_string(val):
             return True
     return False
 
@@ -293,6 +334,12 @@ def validate_sanitized_exchange(
         raise ValidationError(
             "Missing or invalid request.route_key",
             code="invalid_input",
+            exchange_id=ex_id,
+        )
+    if _is_auth_string(route_key):
+        raise ValidationError(
+            "Rejected input containing auth-shaped field [REDACTED]",
+            code="auth_field_detected",
             exchange_id=ex_id,
         )
 

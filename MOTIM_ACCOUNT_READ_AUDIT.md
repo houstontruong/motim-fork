@@ -95,3 +95,13 @@ Fix the remaining defect with targeted regressions:
 
 1. **MEDIUM — redaction separator-normalization gap** (`motim/redact.py`). Synthetic keys `n_o_n_c_e` and `n-o-n-c-e` are rejected at reconciliation ingest, but could remain unredacted when `redact_header_value`, `redact_query_string`, or `redact_data_structure` is invoked independently. Apply a shared lowercase + hyphen/underscore-normalized sensitive-name match across all redaction paths.
 
+## Round 7 — Final Confidentiality Remediation
+
+Fix all four confidentiality findings with targeted regressions:
+
+1. **HIGH — credential-bearing route key accepted and echoed in unsupported_schema** (`motim/reconcile/validator.py`, `adapters/bybit.py`, `adapters/lighter.py`). Reject credential-bearing URL/userinfo/query material before adapters can echo it; errors must be redacted and produce zero facts.
+2. **MEDIUM — URL userinfo credentials visible in Redactor.redact_url()** (`motim/redact.py`). Sanitization must handle userinfo robustly (including URLs without query strings) as well as sensitive query fields.
+3. **MEDIUM — Redactor.redact_data_structure() only traverses dict/list** (`motim/redact.py`). Make structural redaction safely recursive across mapping, tuple, set, and frozenset inputs without breaking deterministic or JSON-safe expectations.
+4. **MEDIUM — Redactor.redact_body_bytes() preserves form auth fields when content type unknown** (`motim/redact.py`). Apply fail-closed treatment that masks sensitive key/value material without corrupting legitimate benign content.
+
+

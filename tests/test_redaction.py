@@ -299,3 +299,138 @@ def test_pipeline_redaction_before_persistence(tmp_path: Path):
 
     finally:
         writer.close()
+
+
+def test_redactor_url_userinfo_redaction():
+    """Verify Redactor.redact_url() properly redacts userinfo credentials with or without query strings."""
+    redactor = Redactor(profile="strict")
+
+    # 1. URL with username:password and no query string
+    url_noparams = "https://admin:super_secret_password_123@api.example.com/v1/positions"
+    redacted = redactor.redact_url(url_noparams)
+    assert redacted is not None
+    assert "super_secret_password_123" not in redacted
+    assert "admin:[REDACTED]@api.example.com" in redacted
+    assert "/v1/positions" in redacted
+
+    # 2. URL with sensitive username / API key in userinfo
+    url_apikey = "https://sk_live_canary_key_9988@api.example.com/v1/data"
+    redacted_apikey = redactor.redact_url(url_apikey)
+    assert redacted_apikey is not None
+    assert "sk_live_canary_key_9988" not in redacted_apikey
+    assert "[REDACTED]@api.example.com" in redacted_apikey
+
+    # 3. URL with userinfo and query parameters
+    url_full = "https://user:mypassword@api.example.com:8443/data?token=secret_tok_456&client_id=123"
+    redacted_full = redactor.redact_url(url_full)
+    assert redacted_full is not None
+    assert "mypassword" not in redacted_full
+    assert "secret_tok_456" not in redacted_full
+    assert "client_id=123" in redacted_full
+    assert "user:[REDACTED]@api.example.com:8443" in redacted_full
+
+    # 4. Schemeless URL with userinfo
+    url_schemeless = "user:secretpass789@example.com/positions"
+    redacted_schemeless = redactor.redact_url(url_schemeless)
+    assert redacted_schemeless is not None
+    assert "secretpass789" not in redacted_schemeless
+    assert "user:[REDACTED]@example.com/positions" in redacted_schemeless
+
+    # 5. Clean URL without userinfo or query params preserved
+    url_clean = "https://api.example.com/v1/public/ping"
+    assert redactor.redact_url(url_clean) == url_clean
+
+
+def test_redactor_recursive_containers_data_structure():
+    """Verify Redactor.redact_data_structure() recursively redacts tuples, sets, frozensets, and mappings."""
+    redactor = Redactor(profile="strict")
+
+    # 1. Tuple containing sensitive dict and strings
+    data_tuple = ("safe_first", {"password": "top_secret_pass", "safe_k": "val"}, ("Bearer CANARY_TUPLE_TOKEN_123",))
+    redacted_tuple = redactor.redact_data_structure(data_tuple)
+    assert isinstance(redacted_tuple, tuple)
+    assert redacted_tuple[0] == "safe_first"
+    assert redacted_tuple[1]["password"] == "[REDACTED]"
+    assert redacted_tuple[1]["safe_k"] == "val"
+    assert "top_secret_pass" not in str(redacted_tuple)
+    assert "CANARY_TUPLE_TOKEN_123" not in str(redacted_tuple)
+    assert redacted_tuple[2] == ("Bearer [REDACTED]",)
+
+    # 2. Set containing sensitive tokens
+    data_set = {"public_tag", "Bearer CANARY_SET_TOKEN_456", "ghp_CANARY_GITHUB_PAT_789"}
+    redacted_set = redactor.redact_data_structure(data_set)
+    assert isinstance(redacted_set, set)
+    assert "public_tag" in redacted_set
+    assert "CANARY_SET_TOKEN_456" not in str(redacted_set)
+    assert "CANARY_GITHUB_PAT_789" not in str(redacted_set)
+    assert "[REDACTED]" in redacted_set or "Bearer [REDACTED]" in redacted_set
+
+    # 3. Frozenset containing sensitive values
+    data_frozenset = frozenset(["clean_entry", "sk_live_CANARY_FROZEN_999"])
+    redacted_frozenset = redactor.redact_data_structure(data_frozenset)
+    assert isinstance(redacted_frozenset, frozenset)
+    assert "clean_entry" in redacted_frozenset
+    assert "CANARY_FROZEN_999" not in str(redacted_frozenset)
+
+    # 4. Deeply nested mixed container tree
+    complex_tree = {
+        "outer_key": [
+            (
+                "item_name",
+                frozenset([("n_o_n_c_e", "secret_nonce_val"), ("api_key", "sec_key_val")]),
+                {"nested_set": {"Bearer CANARY_DEEP_TOKEN_000", "safe_val"}},
+            )
+        ]
+    }
+    redacted_tree = redactor.redact_data_structure(complex_tree)
+    assert "secret_nonce_val" not in str(redacted_tree)
+    assert "sec_key_val" not in str(redacted_tree)
+    assert "CANARY_DEEP_TOKEN_000" not in str(redacted_tree)
+
+
+def test_redactor_body_bytes_unknown_content_type_fail_closed():
+    """Verify Redactor.redact_body_bytes() fail-closed sanitizes form-shaped credentials when content_type is unknown."""
+    redactor = Redactor(profile="strict")
+
+    # 1. Single form field: password with unknown content-type
+    b1 = b"password=my_super_secret_password_1122"
+    r1 = redactor.redact_body_bytes(b1, None)
+    assert r1 is not None
+    assert b"my_super_secret_password_1122" not in r1
+    assert b"password=" in r1
+    assert b"[REDACTED]" in r1 or b"%5BREDACTED%5D" in r1
+
+    # 2. Single auth field: token with empty content-type
+    b2 = b"token=secret_token_val_3344"
+    r2 = redactor.redact_body_bytes(b2, "")
+    assert r2 is not None
+    assert b"secret_token_val_3344" not in r2
+    assert b"token=" in r2
+
+    # 3. Single field: api_key with octet-stream content-type
+    b3 = b"api_key=sk_live_canary_key_5566"
+    r3 = redactor.redact_body_bytes(b3, "application/octet-stream")
+    assert r3 is not None
+    assert b"sk_live_canary_key_5566" not in r3
+    assert b"api_key=" in r3
+
+    # 4. Single field: split-nonce with unknown content-type
+    b4 = b"n_o_n_c_e=secret_split_nonce_7788"
+    r4 = redactor.redact_body_bytes(b4, None)
+    assert r4 is not None
+    assert b"secret_split_nonce_7788" not in r4
+    assert b"n_o_n_c_e=" in r4
+
+    # 5. Multi-line key-value body with unknown / text content-type
+    b5 = b"username=alice\npassword=top_secret_line_pass\npublic_flag=true"
+    r5 = redactor.redact_body_bytes(b5, "text/plain")
+    assert r5 is not None
+    assert b"top_secret_line_pass" not in r5
+    assert b"username=alice" in r5
+    assert b"public_flag=true" in r5
+
+    # 6. Benign content preserved
+    b6 = b"status=ok&count=5&name=Alice"
+    r6 = redactor.redact_body_bytes(b6, None)
+    assert r6 == b"status=ok&count=5&name=Alice"
+
