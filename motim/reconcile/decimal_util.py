@@ -31,6 +31,9 @@ def to_canonical_decimal_str(val: Any) -> str:
     except (InvalidOperation, TypeError) as e:
         raise ValueError(f"Invalid decimal value: {val!r}") from e
 
+    if not d.is_finite():
+        raise ValueError(f"Non-finite decimal value is not allowed: {val!r}")
+
     # Format without scientific notation
     s = f"{d:f}"
     if "." in s:

@@ -228,7 +228,7 @@ def validate_sanitized_exchange(
                 exchange_id=ex_id,
             )
     status = resp.get("status")
-    if not isinstance(status, int):
+    if type(status) is not int:
         raise ValidationError(
             "Missing or invalid response.status (must be integer)",
             code="invalid_input",

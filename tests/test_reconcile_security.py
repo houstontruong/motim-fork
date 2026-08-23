@@ -70,3 +70,43 @@ class TestGate5SecurityRegression:
         parsed = json.loads(cli_result.output)
         assert parsed["outcome"] == "invalid_input"
         assert len(parsed["facts"]) == 0
+
+    @pytest.mark.parametrize(
+        "bad_jsonl,sentinel",
+        [
+            (
+                '{"schema_version": "motim.sanitized_exchange.v1", "exchange_id": "dup-top-1", "provider": "bybit", "captured_at": "2026-08-23T14:00:00Z", "request": {"method": "GET", "route_key": "positions", "authorization": "Bearer CANARY_DUP_TOP_AUTH_001"}, "request": {"method": "GET", "route_key": "positions"}, "response": {"status": 200, "body": {}}}',
+                "CANARY_DUP_TOP_AUTH_001",
+            ),
+            (
+                '{"schema_version": "motim.sanitized_exchange.v1", "exchange_id": "dup-req-1", "provider": "bybit", "captured_at": "2026-08-23T14:00:00Z", "request": {"method": "GET", "secret_header": "Bearer CANARY_DUP_REQ_AUTH_002", "secret_header": "clean", "route_key": "positions"}, "response": {"status": 200, "body": {}}}',
+                "CANARY_DUP_REQ_AUTH_002",
+            ),
+            (
+                '{"schema_version": "motim.sanitized_exchange.v1", "exchange_id": "dup-resp-1", "provider": "bybit", "captured_at": "2026-08-23T14:00:00Z", "request": {"method": "GET", "route_key": "positions"}, "response": {"status": 200, "token": "CANARY_DUP_RESP_TOKEN_003", "token": "clean", "body": {}}}',
+                "CANARY_DUP_RESP_TOKEN_003",
+            ),
+        ],
+    )
+    def test_duplicate_json_keys_containing_sentinels_rejected_and_redacted(self, tmp_path: Path, bad_jsonl: str, sentinel: str):
+        """Duplicate keys at top-level or nested levels are rejected at parse time and never expose secrets."""
+        # 1. API test
+        res = reconcile(bad_jsonl, "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res.outcome == Outcome.INVALID_INPUT.value
+        assert len(res.facts) == 0
+        res_json = json.dumps(res.to_dict())
+        assert sentinel not in res_json
+        for issue in res.issues:
+            assert sentinel not in issue.message
+            assert "[REDACTED]" in issue.message
+
+        # 2. CLI test
+        fixture_file = tmp_path / f"dup_key_{sentinel}.jsonl"
+        fixture_file.write_text(bad_jsonl, encoding="utf-8")
+        runner = CliRunner()
+        cli_res = runner.invoke(
+            cli,
+            ["reconcile", "--input", str(fixture_file), "--provider", "bybit", "--as-of", "2026-08-23T14:05:00Z"],
+        )
+        assert cli_res.exit_code == 4
+        assert sentinel not in cli_res.output

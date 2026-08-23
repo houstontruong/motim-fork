@@ -90,6 +90,19 @@ class TestGate3CLISmoke:
         assert data["outcome"] == Outcome.INVALID_INPUT.value
         assert len(data["facts"]) == 0
 
+    def test_cli_reconcile_negative_max_age_exit_4(self):
+        runner = CliRunner()
+        fixture = str(FIXTURES_DIR / "bybit_all_facts.jsonl")
+        res = runner.invoke(
+            cli,
+            ["reconcile", "--input", fixture, "--provider", "bybit", "--as-of", "2026-08-23T14:05:00Z", "--max-age-seconds", "-10"],
+        )
+        assert res.exit_code == 4
+        data = json.loads(res.output)
+        assert data["outcome"] == Outcome.INVALID_INPUT.value
+        assert len(data["facts"]) == 0
+        assert any(i["code"] == "invalid_input" for i in data["issues"])
+
     def test_cli_facts_and_issues_filter(self, tmp_path: Path):
         runner = CliRunner()
         fixture = str(FIXTURES_DIR / "bybit_all_facts.jsonl")

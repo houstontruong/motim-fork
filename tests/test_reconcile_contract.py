@@ -173,3 +173,133 @@ class TestGate1ContractRequirements:
         conf_issues = [i for i in result.issues if i.code == IssueCode.CONFLICTING_DUPLICATE.value]
         assert len(dup_issues) == 1
         assert len(conf_issues) == 1
+
+    def test_non_finite_decimals_rejected(self):
+        """Non-finite values (NaN, Infinity, -Infinity) are rejected in decimal util and JSON parse."""
+        for non_finite in ("NaN", "Infinity", "-Infinity", float("nan"), float("inf"), float("-inf"), Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity")):
+            with pytest.raises(ValueError, match="Non-finite decimal value"):
+                to_canonical_decimal_str(non_finite)
+
+        # In JSON Lines string parsing
+        for const in ("NaN", "Infinity", "-Infinity"):
+            bad_jsonl = (
+                f'{{"schema_version": "motim.sanitized_exchange.v1", "exchange_id": "nf-1", '
+                f'"provider": "bybit", "captured_at": "2026-08-23T14:00:00Z", '
+                f'"request": {{"method": "GET", "route_key": "positions"}}, '
+                f'"response": {{"status": 200, "body": {{"result": {{"list": [{{"symbol": "BTCUSDT", "size": {const}}}]}}}}}}}}'
+            )
+            res = reconcile(bad_jsonl, "bybit", as_of="2026-08-23T14:05:00Z")
+            assert res.outcome == Outcome.INVALID_INPUT.value
+            assert len(res.facts) == 0
+            assert any("Non-finite" in i.message or "syntax error" in i.message for i in res.issues)
+
+    def test_response_status_boolean_rejected(self):
+        """Boolean response.status (e.g. true) is rejected as invalid integer."""
+        bool_exchange = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": "bool-status-1",
+            "provider": "bybit",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": "positions"},
+            "response": {"status": True, "body": {}},
+        }
+        with pytest.raises(ValidationError, match="response.status"):
+            validate_sanitized_exchange(bool_exchange, expected_provider="bybit")
+
+        # Via JSONL string with literal true
+        bool_jsonl = (
+            '{"schema_version": "motim.sanitized_exchange.v1", "exchange_id": "bool-status-2", '
+            '"provider": "bybit", "captured_at": "2026-08-23T14:00:00Z", '
+            '"request": {"method": "GET", "route_key": "positions"}, '
+            '"response": {"status": true, "body": {}}}'
+        )
+        res = reconcile(bool_jsonl, "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res.outcome == Outcome.INVALID_INPUT.value
+        assert len(res.facts) == 0
+
+    def test_deduplication_order_independence_and_staleness(self):
+        """Exact duplicates retain the latest observed_at fact regardless of input file/list order."""
+        rec_early = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": "ex-early",
+            "provider": "bybit",
+            "captured_at": "2026-08-23T10:00:00Z",
+            "request": {"method": "GET", "route_key": "positions"},
+            "response": {
+                "status": 200,
+                "body": {"result": {"list": [{"symbol": "BTCUSDT", "side": "Buy", "size": "0.5", "entryPrice": "50000", "markPrice": "51000"}]}},
+            },
+        }
+        rec_late = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": "ex-late",
+            "provider": "bybit",
+            "captured_at": "2026-08-23T12:00:00Z",
+            "request": {"method": "GET", "route_key": "positions"},
+            "response": {
+                "status": 200,
+                "body": {"result": {"list": [{"symbol": "BTCUSDT", "side": "Buy", "size": "0.5", "entryPrice": "50000", "markPrice": "51000"}]}},
+            },
+        }
+
+        # As-of is 12:05:00Z, max_age_seconds is 600 (10 min).
+        # rec_early alone is 2h5m old (stale), rec_late is 5m old (fresh).
+        # Merged result MUST be fresh (using 12:00:00Z) regardless of input order.
+        res_forward = reconcile([rec_early, rec_late], "bybit", as_of="2026-08-23T12:05:00Z", max_age_seconds=600)
+        res_reverse = reconcile([rec_late, rec_early], "bybit", as_of="2026-08-23T12:05:00Z", max_age_seconds=600)
+
+        assert res_forward.outcome == Outcome.OK.value
+        assert res_reverse.outcome == Outcome.OK.value
+
+        assert len(res_forward.facts) == 1
+        assert len(res_reverse.facts) == 1
+
+        fact_f = res_forward.facts[0]
+        fact_r = res_reverse.facts[0]
+
+        assert fact_f.observed_at == "2026-08-23T12:00:00Z"
+        assert fact_r.observed_at == "2026-08-23T12:00:00Z"
+        assert fact_f.source_exchange_ids == ["ex-early", "ex-late"]
+        assert fact_r.source_exchange_ids == ["ex-early", "ex-late"]
+        assert fact_f.to_dict() == fact_r.to_dict()
+
+        # Check issues: no stale fact issue in either
+        assert not any(i.code == IssueCode.STALE_FACT.value for i in res_forward.issues)
+        assert not any(i.code == IssueCode.STALE_FACT.value for i in res_reverse.issues)
+
+    def test_reconcile_negative_max_age_seconds(self):
+        """Negative max_age_seconds returns structured invalid_input result."""
+        fixture_path = FIXTURES_DIR / "bybit_all_facts.jsonl"
+        res = reconcile(fixture_path, "bybit", as_of="2026-08-23T14:05:00Z", max_age_seconds=-10)
+        assert res.outcome == Outcome.INVALID_INPUT.value
+        assert len(res.facts) == 0
+        assert any(i.code == IssueCode.INVALID_INPUT.value for i in res.issues)
+
+    def test_direct_jsonl_long_string_and_special_chars(self):
+        """Direct JSONL strings with long content and special characters do not throw OSError."""
+        long_body = "x" * 500
+        special_str = "<test>:|?*"
+        direct_jsonl = (
+            f'{{"schema_version": "motim.sanitized_exchange.v1", "exchange_id": "direct-long-1", '
+            f'"provider": "bybit", "captured_at": "2026-08-23T14:00:00Z", '
+            f'"request": {{"method": "GET", "route_key": "positions"}}, '
+            f'"response": {{"status": 200, "body": {{"result": {{"list": [{{"symbol": "BTCUSDT", "side": "Buy", "size": "0.5", "entryPrice": "50000", "markPrice": "51000", "padding": "{long_body}", "special": "{special_str}"}}]}}}}}}}}'
+        )
+        res = reconcile(direct_jsonl, "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res.outcome == Outcome.OK.value
+        assert len(res.facts) == 1
+
+        # Also test arbitrary long string that is not a valid file path or valid JSON
+        arbitrary_long = "foo_bar_not_a_path_" + ("z" * 400)
+        res_bad = reconcile(arbitrary_long, "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res_bad.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_bad.facts) == 0
+
+    def test_source_line_numbering_with_leading_blank_lines(self):
+        """Preserve source line numbering when leading blank lines precede a syntax error."""
+        content = "\n\n\n{invalid json on line 4"
+        res = reconcile(content, "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res.outcome == Outcome.INVALID_INPUT.value
+        assert len(res.facts) == 0
+        assert len(res.issues) >= 1
+        assert "line 4" in res.issues[0].message

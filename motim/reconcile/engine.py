@@ -14,6 +14,27 @@ from .staleness import check_staleness
 from .validator import ValidationError, parse_rfc3339_z, validate_sanitized_exchange
 
 
+class DuplicateKeyError(ValueError):
+    """Raised when duplicate keys are found in a JSON object."""
+
+
+class NonFiniteNumericError(ValueError):
+    """Raised when non-finite numeric constants (NaN, Infinity) are found in JSON."""
+
+
+def _parse_pairs_rejecting_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    res: dict[str, Any] = {}
+    for k, v in pairs:
+        if k in res:
+            raise DuplicateKeyError("Duplicate JSON key detected [REDACTED]")
+        res[k] = v
+    return res
+
+
+def _reject_non_finite_constant(val: str) -> Any:
+    raise NonFiniteNumericError("Non-finite JSON numeric constant detected [REDACTED]")
+
+
 def _parse_input_exchanges(
     exchanges: list[dict[str, Any]] | Iterable[dict[str, Any]] | str | Path,
 ) -> tuple[list[dict[str, Any]], list[Issue]]:
@@ -37,21 +58,26 @@ def _parse_input_exchanges(
 
     if isinstance(exchanges, str):
         # Could be a file path or direct JSONL string
-        path_candidate = Path(exchanges)
-        if path_candidate.exists() and path_candidate.is_file():
+        # Safely distinguish without unguarded filesystem probing
+        if "\n" not in exchanges and "\r" not in exchanges and not exchanges.strip().startswith("{"):
             try:
-                content = path_candidate.read_text(encoding="utf-8")
-                return _parse_jsonl_string(content)
-            except Exception as e:
-                return [], [
-                    Issue(
-                        code=IssueCode.INVALID_INPUT.value,
-                        provider="",
-                        source_exchange_id=None,
-                        severity=Severity.ERROR.value,
-                        message=f"Failed to read input file: {e}",
-                    )
-                ]
+                path_candidate = Path(exchanges)
+                if path_candidate.is_file():
+                    try:
+                        content = path_candidate.read_text(encoding="utf-8")
+                        return _parse_jsonl_string(content)
+                    except Exception as e:
+                        return [], [
+                            Issue(
+                                code=IssueCode.INVALID_INPUT.value,
+                                provider="",
+                                source_exchange_id=None,
+                                severity=Severity.ERROR.value,
+                                message=f"Failed to read input file: {e}",
+                            )
+                        ]
+            except (OSError, ValueError):
+                pass
         return _parse_jsonl_string(exchanges)
 
     # It's an iterable / list of dicts
@@ -75,8 +101,8 @@ def _parse_input_exchanges(
 def _parse_jsonl_string(content: str) -> tuple[list[dict[str, Any]], list[Issue]]:
     records: list[dict[str, Any]] = []
     issues: list[Issue] = []
-    lines = content.strip().splitlines()
-    if not lines:
+
+    if not content or not content.strip():
         return [], [
             Issue(
                 code=IssueCode.INVALID_INPUT.value,
@@ -87,12 +113,19 @@ def _parse_jsonl_string(content: str) -> tuple[list[dict[str, Any]], list[Issue]
             )
         ]
 
+    # Split lines without full strip to preserve original source line numbers
+    lines = content.splitlines()
+
     for line_no, raw_line in enumerate(lines, start=1):
         line = raw_line.strip()
         if not line:
             continue
         try:
-            obj = json.loads(line)
+            obj = json.loads(
+                line,
+                object_pairs_hook=_parse_pairs_rejecting_duplicates,
+                parse_constant=_reject_non_finite_constant,
+            )
             if not isinstance(obj, dict):
                 issues.append(
                     Issue(
@@ -105,6 +138,16 @@ def _parse_jsonl_string(content: str) -> tuple[list[dict[str, Any]], list[Issue]
                 )
             else:
                 records.append(obj)
+        except (DuplicateKeyError, NonFiniteNumericError) as e:
+            issues.append(
+                Issue(
+                    code=IssueCode.INVALID_INPUT.value,
+                    provider="",
+                    source_exchange_id=None,
+                    severity=Severity.ERROR.value,
+                    message=f"JSON syntax error on line {line_no}: {e}",
+                )
+            )
         except json.JSONDecodeError as e:
             issues.append(
                 Issue(
@@ -113,6 +156,16 @@ def _parse_jsonl_string(content: str) -> tuple[list[dict[str, Any]], list[Issue]
                     source_exchange_id=None,
                     severity=Severity.ERROR.value,
                     message=f"JSON syntax error on line {line_no}: {e}",
+                )
+            )
+        except Exception:
+            issues.append(
+                Issue(
+                    code=IssueCode.INVALID_INPUT.value,
+                    provider="",
+                    source_exchange_id=None,
+                    severity=Severity.ERROR.value,
+                    message=f"JSON syntax error on line {line_no} [REDACTED]",
                 )
             )
     return records, issues
@@ -131,6 +184,25 @@ def reconcile(
     Pure-functional, deterministic, offline-only engine. No network or clock access.
     """
     prov = provider.lower().strip()
+
+    # Validate max_age_seconds
+    if isinstance(max_age_seconds, bool) or not isinstance(max_age_seconds, (int, float)) or max_age_seconds < 0:
+        as_of_display = as_of.strftime("%Y-%m-%dT%H:%M:%SZ") if isinstance(as_of, datetime) else str(as_of)
+        return AccountReadResult(
+            provider=prov,
+            as_of=as_of_display,
+            outcome=Outcome.INVALID_INPUT.value,
+            facts=[],
+            issues=[
+                Issue(
+                    code=IssueCode.INVALID_INPUT.value,
+                    provider=prov,
+                    source_exchange_id=None,
+                    severity=Severity.ERROR.value,
+                    message=f"max_age_seconds must be a non-negative integer, got {max_age_seconds!r}",
+                )
+            ],
+        )
 
     # Validate as_of format
     if isinstance(as_of, datetime):

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 import hashlib
 import json
 from collections import defaultdict
 from typing import Any
 
 from .models import Fact, Issue, IssueCode, Severity
+from .validator import parse_rfc3339_z
 
 
 def canonical_json_bytes(data: dict[str, Any]) -> bytes:
@@ -26,6 +28,14 @@ def compute_dedup_key(fact: Fact, native_id: str | None = None) -> str:
     return f"{fact.provider}:{fact.account_scope}:{fact.fact_type}:{key_id}"
 
 
+def _fact_sort_key(fact: Fact) -> tuple[datetime, str]:
+    try:
+        dt = parse_rfc3339_z(fact.observed_at)
+    except Exception:
+        dt = datetime.min.replace(tzinfo=timezone.utc)
+    return (dt, fact.fact_id)
+
+
 def deduplicate_facts(
     raw_facts: list[tuple[Fact, str | None]],
     provider: str,
@@ -35,7 +45,8 @@ def deduplicate_facts(
     `raw_facts` is a list of tuples: `(Fact, native_id | None)`.
 
     Rules:
-    - Exact duplicates collapse into one fact and generate a `duplicate_event` issue.
+    - Exact duplicates collapse into one fact, retaining the latest observed_at fact
+      and unioning all source exchange IDs deterministically. Generates a `duplicate_event` issue.
     - Conflicting duplicates produce no merged fact and generate a `conflicting_duplicate` issue.
     """
     grouped: dict[str, list[Fact]] = defaultdict(list)
@@ -46,7 +57,7 @@ def deduplicate_facts(
     final_facts: list[Fact] = []
     issues: list[Issue] = []
 
-    for key, group in grouped.items():
+    for key, group in sorted(grouped.items(), key=lambda item: item[0]):
         if len(group) == 1:
             final_facts.append(group[0])
             continue
@@ -54,32 +65,32 @@ def deduplicate_facts(
         # Check if all records in group have identical data
         first_payload_bytes = canonical_json_bytes(group[0].data)
         all_identical = True
-        all_source_ids: list[str] = []
         for f in group:
-            for s_id in f.source_exchange_ids:
-                if s_id not in all_source_ids:
-                    all_source_ids.append(s_id)
             if canonical_json_bytes(f.data) != first_payload_bytes:
                 all_identical = False
+                break
+
+        # Deterministic union of source exchange IDs
+        all_source_ids: list[str] = sorted({s_id for f in group for s_id in f.source_exchange_ids if s_id})
 
         if all_identical:
-            # Exact duplicate: collapse into one fact
-            base_fact = group[0]
+            # Exact duplicate: collapse into one fact, retaining latest observed_at
+            latest_fact = max(group, key=_fact_sort_key)
             merged_fact = Fact(
-                fact_id=base_fact.fact_id,
-                fact_type=base_fact.fact_type,
-                provider=base_fact.provider,
-                account_scope=base_fact.account_scope,
-                observed_at=base_fact.observed_at,
+                fact_id=latest_fact.fact_id,
+                fact_type=latest_fact.fact_type,
+                provider=latest_fact.provider,
+                account_scope=latest_fact.account_scope,
+                observed_at=latest_fact.observed_at,
                 source_exchange_ids=all_source_ids,
-                data=base_fact.data,
+                data=latest_fact.data,
             )
             final_facts.append(merged_fact)
             issues.append(
                 Issue(
                     code=IssueCode.DUPLICATE_EVENT.value,
                     provider=provider,
-                    source_exchange_id=group[1].source_exchange_ids[0] if group[1].source_exchange_ids else None,
+                    source_exchange_id=all_source_ids[0] if all_source_ids else None,
                     severity=Severity.INFO.value,
                     message=f"Duplicate event collapsed into single fact (source IDs: {', '.join(all_source_ids)})",
                 )
@@ -90,7 +101,7 @@ def deduplicate_facts(
                 Issue(
                     code=IssueCode.CONFLICTING_DUPLICATE.value,
                     provider=provider,
-                    source_exchange_id=group[0].source_exchange_ids[0] if group[0].source_exchange_ids else None,
+                    source_exchange_id=all_source_ids[0] if all_source_ids else None,
                     severity=Severity.WARNING.value,
                     message=f"Conflicting records detected for key '{key}' (source IDs: {', '.join(all_source_ids)}); record omitted",
                 )
