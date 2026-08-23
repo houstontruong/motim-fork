@@ -27,7 +27,8 @@ We have implemented and remediated the offline-only account-read reconciliation 
 
 ## 2. Codex Audit Remediation (MOTIM_ACCOUNT_READ_AUDIT.md)
 
-All 7 findings (2 HIGH, 4 MEDIUM, 1 LOW) from `MOTIM_ACCOUNT_READ_AUDIT.md` have been resolved with targeted regression tests:
+### Round 1 Remediation (Commit `770f700`)
+All 7 findings (2 HIGH, 4 MEDIUM, 1 LOW) from Round 1 were resolved with targeted regression tests:
 
 | Finding | Severity | Description & Remediation | Regression Tests |
 |---|---|---|---|
@@ -39,18 +40,27 @@ All 7 findings (2 HIGH, 4 MEDIUM, 1 LOW) from `MOTIM_ACCOUNT_READ_AUDIT.md` have
 | **Direct JSONL strings throw during path probing** | **MEDIUM** | Updated `_parse_input_exchanges` to bypass path probing for JSON-prefixed/multiline strings and wrapped probing in `try...except (OSError, ValueError)`. | `tests/test_reconcile_contract.py`<br>- `test_direct_jsonl_long_string_and_special_chars` verifying long JSONL strings and arbitrary strings without `OSError`. |
 | **Syntax line numbers lose leading blank lines** | **LOW** | Changed `_parse_jsonl_string` to avoid stripping the full string before `splitlines()`, preserving original physical source line numbering. | `tests/test_reconcile_contract.py`<br>- `test_source_line_numbering_with_leading_blank_lines` verifying line 4 error reporting when preceded by blank lines. |
 
+### Round 2 Remediation (Commit Follow-Up)
+All 3 findings (2 MEDIUM, 1 LOW) from Round 2 have been resolved with focused regression tests:
+
+| Finding | Severity | Description & Remediation | Regression Tests |
+|---|---|---|---|
+| **Iterable/dict API values bypass non-finite rejection** | **MEDIUM** | Added recursive `contains_non_finite_values` validation in `validate_sanitized_exchange` checking for `float` (`nan`, `inf`, `-inf`) and `Decimal` (`NaN`, `Infinity`, `-Infinity`) across nested structures before adapter dispatch. Emits structured redacted `invalid_input` without value leakage. | `tests/test_reconcile_contract.py`<br>- `test_iterable_dict_non_finite_rejection` testing nested non-finites in direct dict lists and generator iterables. |
+| **Library `max_age_seconds` accepts non-integer/non-finite numbers** | **MEDIUM** | Enforced strict non-negative integer validation (`type is int and >= 0`, rejecting `bool`, `float`, `NaN`, `Infinity`, strings) at both library boundary (`reconcile()`) and `check_staleness()`. | `tests/test_reconcile_contract.py`<br>- `test_reconcile_max_age_seconds_rejects_floats_and_non_finites` testing floats (`10.5`), non-finites (`nan`, `inf`), Decimals, bools, and negative values. |
+| **Ambiguous valid file paths treated as literal JSONL** | **LOW** | Safely attempted `Path.is_file()` inside `try...except (OSError, ValueError)` prior to literal JSON parsing fallback, ensuring valid files starting with `{` or containing special characters are properly read as files. | `tests/test_reconcile_contract.py`<br>- `test_path_handling_with_brackets_and_special_names` verifying files named `"{bybit_bracket_test}.jsonl"` are successfully resolved and reconciled. |
+
 ---
 
 ## 3. Verification Gate Results (Gates 1 – 6)
 
 | Gate | Requirement | Verification Method | Status |
 |---|---|---|---|
-| **Gate 1: Contract Tests** | Valid/invalid schema, strict mode, decimal string canonicalization, non-finite rejection, source traceability, deterministic staleness, input-order independent deduplication, boolean status rejection, preserved line numbers. | `tests/test_reconcile_contract.py`<br>- 14 test cases covering all contract specifications and audit regressions. | **PASSED** (14/14) ✅ |
+| **Gate 1: Contract Tests** | Valid/invalid schema, strict mode, decimal string canonicalization, non-finite rejection, source traceability, deterministic staleness, input-order independent deduplication, boolean status rejection, preserved line numbers, direct iterable/dict non-finite rejection, max age integer enforcement, bracket file paths. | `tests/test_reconcile_contract.py`<br>- 17 test cases covering all contract specifications and audit regressions. | **PASSED** (17/17) ✅ |
 | **Gate 2: Adapter Tests** | Bybit and Lighter adapters across all 6 fact types (`position`, `fill`, `funding`, `balance`, `equity`, `pnl`), malformed records, unknown route schemas, mixed recognized/unsupported batches. | `tests/test_reconcile_adapters.py`<br>- 5 test cases for Bybit and Lighter adapters. | **PASSED** (5/5) ✅ |
 | **Gate 3: CLI Smoke** | `motim reconcile`, `motim facts`, `motim issues` verifying stdout JSON format and exit codes `0`, `2`, `3`, `4`, including negative max age. | `tests/test_reconcile_cli.py`<br>- 10 test cases covering CLI smoke and edge cases. | **PASSED** (10/10) ✅ |
 | **Gate 4: No-Network & No-Replay** | Static AST audit ensuring no network modules are imported in reconciliation code; subprocess execution under an active socket/DNS sabotaged guard; no request builders or replay mechanisms. | `tests/test_reconcile_no_network.py`<br>- 3 test cases auditing AST and running under active network sabotage guard. | **PASSED** (3/3) ✅ |
 | **Gate 5: Security Regression** | Ingestion of canary secret tokens across headers, cookies, query, body, and duplicate-key bypass vectors; assert zero leaks in output JSON, stderr, or reports. | `tests/test_reconcile_security.py`<br>- 5 test cases asserting zero secret sentinel leaks. | **PASSED** (5/5) ✅ |
-| **Gate 6: Full Suite** | Full test suite regression green. | `pytest` running all 171 test cases across the entire repository. | **PASSED** (171/171) ✅ |
+| **Gate 6: Full Suite** | Full test suite regression green. | `pytest` running all 174 test cases across the entire repository. | **PASSED** (174/174) ✅ |
 
 ---
 
@@ -64,26 +74,26 @@ configfile: pyproject.toml
 testpaths: tests
 plugins: anyio-4.13.0, asyncio-1.3.0, timeout-2.4.0
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 171 items
+collected 174 items
 
 tests\test_auth.py .....................                                 [ 12%]
-tests\test_cli.py .................                                      [ 22%]
-tests\test_client.py ..                                                  [ 23%]
-tests\test_config.py ............                                        [ 30%]
+tests\test_cli.py .................                                      [ 21%]
+tests\test_client.py ..                                                  [ 22%]
+tests\test_config.py ............                                        [ 29%]
 tests\test_diff.py .                                                     [ 30%]
 tests\test_egress.py ........                                            [ 35%]
-tests\test_exchange_db.py .....                                          [ 38%]
-tests\test_exchange_writer.py .                                          [ 39%]
-tests\test_gates.py ..................                                   [ 49%]
+tests\test_exchange_db.py .....                                          [ 37%]
+tests\test_exchange_writer.py .                                          [ 38%]
+tests\test_gates.py ..................                                   [ 48%]
 tests\test_linkfinder_integration.py ..                                  [ 50%]
-tests\test_reconcile_adapters.py .....                                   [ 53%]
-tests\test_reconcile_cli.py ..........                                   [ 59%]
-tests\test_reconcile_contract.py ..............                          [ 67%]
-tests\test_reconcile_no_network.py ...                                   [ 69%]
+tests\test_reconcile_adapters.py .....                                   [ 52%]
+tests\test_reconcile_cli.py ..........                                   [ 58%]
+tests\test_reconcile_contract.py .................                       [ 68%]
+tests\test_reconcile_no_network.py ...                                   [ 70%]
 tests\test_reconcile_security.py .....                                   [ 72%]
 tests\test_redaction.py .....                                            [ 75%]
 tests\test_service.py ........................                           [ 89%]
 tests\test_store.py ..................                                   [100%]
 
-============================= 171 passed in 5.42s =============================
+============================= 174 passed in 5.42s =============================
 ```

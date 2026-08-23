@@ -26,8 +26,8 @@ def check_staleness(
     else:
         raise ValueError("as_of must be an RFC3339 string or datetime instance")
 
-    if max_age_seconds < 0:
-        raise ValueError("max_age_seconds must be non-negative")
+    if isinstance(max_age_seconds, bool) or not isinstance(max_age_seconds, int) or max_age_seconds < 0:
+        raise ValueError("max_age_seconds must be a non-negative integer")
 
     issues: list[Issue] = []
     for fact in facts:

@@ -303,3 +303,87 @@ class TestGate1ContractRequirements:
         assert len(res.facts) == 0
         assert len(res.issues) >= 1
         assert "line 4" in res.issues[0].message
+
+    def test_iterable_dict_non_finite_rejection(self):
+        """Direct iterable/dict inputs carrying nested non-finite values are rejected with invalid_input."""
+        non_finite_values = [
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            Decimal("NaN"),
+            Decimal("Infinity"),
+            Decimal("-Infinity"),
+        ]
+        for nf_val in non_finite_values:
+            # Nested in response body
+            exchange_dict = {
+                "schema_version": "motim.sanitized_exchange.v1",
+                "exchange_id": "nf-dict-test",
+                "provider": "bybit",
+                "captured_at": "2026-08-23T14:00:00Z",
+                "request": {"method": "GET", "route_key": "positions"},
+                "response": {
+                    "status": 200,
+                    "body": {
+                        "result": {
+                            "list": [
+                                {
+                                    "symbol": "BTCUSDT",
+                                    "side": "Buy",
+                                    "size": nf_val,
+                                    "entryPrice": "50000",
+                                }
+                            ]
+                        }
+                    },
+                },
+            }
+
+            # Direct list input
+            res_list = reconcile([exchange_dict], "bybit", as_of="2026-08-23T14:05:00Z")
+            assert res_list.outcome == Outcome.INVALID_INPUT.value
+            assert len(res_list.facts) == 0
+            assert any("non-finite" in i.message.lower() for i in res_list.issues)
+
+            # Direct generator / iterable input
+            res_iter = reconcile((ex for ex in [exchange_dict]), "bybit", as_of="2026-08-23T14:05:00Z")
+            assert res_iter.outcome == Outcome.INVALID_INPUT.value
+            assert len(res_iter.facts) == 0
+
+    def test_reconcile_max_age_seconds_rejects_floats_and_non_finites(self):
+        """max_age_seconds must be a non-negative integer; floats and non-finites return invalid_input."""
+        fixture_path = FIXTURES_DIR / "bybit_all_facts.jsonl"
+        bad_max_ages = [
+            10.5,
+            float("nan"),
+            float("inf"),
+            float("-inf"),
+            Decimal("10"),
+            "10",
+            True,
+            False,
+            -1,
+            -100,
+        ]
+        for bad_age in bad_max_ages:
+            res = reconcile(fixture_path, "bybit", as_of="2026-08-23T14:05:00Z", max_age_seconds=bad_age)  # type: ignore[arg-type]
+            assert res.outcome == Outcome.INVALID_INPUT.value
+            assert len(res.facts) == 0
+            assert any(i.code == IssueCode.INVALID_INPUT.value for i in res.issues)
+
+    def test_path_handling_with_brackets_and_special_names(self, tmp_path: Path):
+        """Existing file paths starting with '{' or containing brackets are read as files rather than literal JSON."""
+        valid_jsonl = (
+            '{"schema_version": "motim.sanitized_exchange.v1", "exchange_id": "bracket-path-1", '
+            '"provider": "bybit", "captured_at": "2026-08-23T14:00:00Z", '
+            '"request": {"method": "GET", "route_key": "positions"}, '
+            '"response": {"status": 200, "body": {"result": {"list": [{"symbol": "BTCUSDT", "side": "Buy", "size": "0.5", "entryPrice": "50000", "markPrice": "51000"}]}}}}\n'
+        )
+        bracket_file = tmp_path / "{bybit_bracket_test}.jsonl"
+        bracket_file.write_text(valid_jsonl, encoding="utf-8")
+
+        # Pass path as string
+        res = reconcile(str(bracket_file), "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res.outcome == Outcome.OK.value
+        assert len(res.facts) == 1
+        assert res.facts[0].source_exchange_ids == ["bracket-path-1"]

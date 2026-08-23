@@ -57,27 +57,25 @@ def _parse_input_exchanges(
         return _parse_jsonl_string(content)
 
     if isinstance(exchanges, str):
-        # Could be a file path or direct JSONL string
-        # Safely distinguish without unguarded filesystem probing
-        if "\n" not in exchanges and "\r" not in exchanges and not exchanges.strip().startswith("{"):
-            try:
-                path_candidate = Path(exchanges)
-                if path_candidate.is_file():
-                    try:
-                        content = path_candidate.read_text(encoding="utf-8")
-                        return _parse_jsonl_string(content)
-                    except Exception as e:
-                        return [], [
-                            Issue(
-                                code=IssueCode.INVALID_INPUT.value,
-                                provider="",
-                                source_exchange_id=None,
-                                severity=Severity.ERROR.value,
-                                message=f"Failed to read input file: {e}",
-                            )
-                        ]
-            except (OSError, ValueError):
-                pass
+        # Prefer a safe Path.is_file() attempt with OSError handling before choosing literal parsing
+        try:
+            path_candidate = Path(exchanges)
+            if path_candidate.is_file():
+                try:
+                    content = path_candidate.read_text(encoding="utf-8")
+                    return _parse_jsonl_string(content)
+                except Exception as e:
+                    return [], [
+                        Issue(
+                            code=IssueCode.INVALID_INPUT.value,
+                            provider="",
+                            source_exchange_id=None,
+                            severity=Severity.ERROR.value,
+                            message=f"Failed to read input file: {e}",
+                        )
+                    ]
+        except (OSError, ValueError):
+            pass
         return _parse_jsonl_string(exchanges)
 
     # It's an iterable / list of dicts
@@ -186,7 +184,7 @@ def reconcile(
     prov = provider.lower().strip()
 
     # Validate max_age_seconds
-    if isinstance(max_age_seconds, bool) or not isinstance(max_age_seconds, (int, float)) or max_age_seconds < 0:
+    if isinstance(max_age_seconds, bool) or not isinstance(max_age_seconds, int) or max_age_seconds < 0:
         as_of_display = as_of.strftime("%Y-%m-%dT%H:%M:%SZ") if isinstance(as_of, datetime) else str(as_of)
         return AccountReadResult(
             provider=prov,

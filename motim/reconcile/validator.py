@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import re
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from .models import SCHEMA_VERSION_INPUT
@@ -88,6 +90,25 @@ def contains_auth_elements(val: Any) -> bool:
     return False
 
 
+def contains_non_finite_values(val: Any) -> bool:
+    """Recursively check for non-finite float or Decimal values."""
+    if isinstance(val, dict):
+        for v in val.values():
+            if contains_non_finite_values(v):
+                return True
+    elif isinstance(val, (list, tuple, set)):
+        for item in val:
+            if contains_non_finite_values(item):
+                return True
+    elif isinstance(val, float):
+        if math.isnan(val) or math.isinf(val):
+            return True
+    elif isinstance(val, Decimal):
+        if not val.is_finite():
+            return True
+    return False
+
+
 def validate_sanitized_exchange(
     exchange: dict[str, Any],
     expected_provider: str,
@@ -109,6 +130,15 @@ def validate_sanitized_exchange(
         raise ValidationError(
             "Rejected input containing auth-shaped field [REDACTED]",
             code="auth_field_detected",
+            exchange_id=ex_id,
+        )
+
+    # 2. Non-Finite Numeric Check
+    if contains_non_finite_values(exchange):
+        ex_id = exchange.get("exchange_id") if isinstance(exchange.get("exchange_id"), str) else None
+        raise ValidationError(
+            "Rejected input containing non-finite numeric value [REDACTED]",
+            code="invalid_input",
             exchange_id=ex_id,
         )
 
