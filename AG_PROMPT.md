@@ -1,4 +1,4 @@
-# AG_PROMPT.md — Motim Account-Read Reconciliation: Round 10 Deep-Encoding Remediation
+# AG_PROMPT.md — Motim Account-Read Reconciliation: Round 11 Bounded-Decoding Remediation
 
 Working directory: `C:\Users\houst\PycharmProjects\motim-fork`
 
@@ -6,16 +6,12 @@ Read `./SPEC.md` before coding. Treat it as a brief, not a blueprint.
 
 ## Task
 
-Remediate the remaining HIGH finding from the independent Codex audit of exact commit `cb21423d1a043108f454c5296ae2f6a9da2a13a8`. The project remains strictly **offline-only**. Read the current source, tests, `ACCOUNT_READ_CONTRACT.md`, `MOTIM_ACCOUNT_READ_AUDIT.md`, `motim-account-read-audit-fix.md`, and `motim-account-read-report.md` before changing code.
+Remediate the remaining findings from the independent Codex audit of exact commit `08ae77bedf9a78d1c710db20d8fc9d5f5231e689`. The project remains strictly **offline-only**. Read the current source, relevant tests, `ACCOUNT_READ_CONTRACT.md`, `MOTIM_ACCOUNT_READ_AUDIT.md`, `motim-account-read-audit-fix.md`, and `motim-account-read-report.md` before changing code.
 
-**Finding — deep percent-encoding bypass (HIGH):** `motim/reconcile/validator.py` decodes only five rounds; the Bybit and Lighter adapter issue sanitizers use the same limit. A route whose structural delimiters are encoded six times, such as a six-layer encoding of `unsupported?api_key=TOPSECRET_DEPTH6`, passes `_is_auth_string()` and produces an unsupported-route issue reflecting the secret.
+1. **HIGH — malformed percent sequences bypass auth/redaction:** `_has_percent_encoding()` only recognizes valid `%XX` triples. Inputs such as `api%GG_key: TOPSECRET`, `api%G0_key`, `api%0G_key`, or `api%` can bypass `contains_auth_elements()` and standalone `Redactor.redact_data_structure()`. Treat **any remaining percent character** in a sensitive-name/route parsing context as unresolved and suspicious after bounded decoding: reject at ingestion with `invalid_input`, zero facts, no secret output; classify the name as sensitive in redaction. Add direct/API/JSONL/CLI regressions for all malformed forms.
+2. **MEDIUM — quadratic decoding CPU cost:** the input-length-derived decode bound makes repeated `%25` sequences quadratic. Replace it with a small constant decode-depth cap and fail closed if any percent character remains after that cap; also enforce modest maximum route and field/key string lengths before decode. The limits must be documented and tested so ordinary routes remain accepted. Add hostile-size regressions that prove bounded/structured failure without seconds-long processing.
 
-Implement the smallest robust fix:
-
-- Decode to a real safe fixed point with a bound derived from input length, **or** fail closed when valid percent-encoding remains after a safe bounded decode limit.
-- Apply the same safe behavior to validation and every adapter route-derived message. Never reflect the original encoded route if decoding cannot complete safely.
-- Add API, JSONL, CLI, Bybit, and Lighter regressions at more than five encoding layers. They must prove `invalid_input`, zero facts, redacted/no-secret output, and CLI exit code 4.
-- Preserve all prior fixes and strict no-network/no-replay/no-real-credentials constraints. Do not capture traffic, sign in, make HTTP/WebSocket requests, open a socket, mutate an account, or create a real-capture runbook.
+Use the smallest robust solution. Apply the exact same fail-closed treatment to validator, redactor, and adapter route-derived issue messages. Preserve all prior fixes and strict no-network/no-replay/no-real-credentials constraints. Do not capture traffic, sign in, make HTTP/WebSocket requests, open a socket, mutate an account, or create a real-capture runbook.
 
 If you see a better approach than this brief describes, say so and explain why before changing direction.
 
@@ -23,7 +19,7 @@ Commit only after verified checkpoints using a conventional commit, then push to
 
 ## Expected output files
 
-- Updated `motim-account-read-audit-fix.md` documenting this finding, changed files, exact verification commands with actual output/exit codes, and remaining gaps.
+- Updated `motim-account-read-audit-fix.md` documenting both findings, changed files, exact verification commands with actual output/exit codes, and remaining gaps.
 - Updated regression tests covering every listed reproduction.
 - Updated `motim-account-read-report.md` with the new verification evidence.
 
@@ -35,7 +31,7 @@ When all outputs are written, run this in PowerShell to notify OpenClaw:
 $topic = "ag-openclaw-b4zaCyNakC3zMJ566TYCa0ifoXdprXhwu9gm5UjdiJs"
 $payload = @{
   schema = "ag.ntfy.v1"
-  job = "motim-account-read-codex-fixes-10"
+  job = "motim-account-read-codex-fixes-11"
   status = "complete"
   project_dir = "C:\Users\houst\PycharmProjects\motim-fork"
   required = @("motim-account-read-audit-fix.md", "motim-account-read-report.md")
