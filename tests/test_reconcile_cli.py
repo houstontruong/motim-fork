@@ -103,6 +103,29 @@ class TestGate3CLISmoke:
         assert len(data["facts"]) == 0
         assert any(i["code"] == "invalid_input" for i in data["issues"])
 
+    @pytest.mark.parametrize("bad_method", ["POST", "PUT", "PATCH", "DELETE"])
+    def test_cli_reconcile_non_get_method_exit_4(self, bad_method: str, tmp_path: Path):
+        """CLI strictly rejects non-GET request methods with exit code 4 and invalid_input JSON."""
+        runner = CliRunner()
+        bad_jsonl = (
+            f'{{"schema_version": "motim.sanitized_exchange.v1", "exchange_id": "method-{bad_method}", '
+            f'"provider": "bybit", "captured_at": "2026-08-23T14:00:00Z", '
+            f'"request": {{"method": "{bad_method}", "route_key": "positions"}}, '
+            f'"response": {{"status": 200, "body": {{"result": {{"list": [{{"symbol": "BTCUSDT", "side": "Buy", "size": "0.5", "entryPrice": "50000", "markPrice": "51000"}}]}}}}}}}}'
+        )
+        fixture_file = tmp_path / f"method_{bad_method}.jsonl"
+        fixture_file.write_text(bad_jsonl, encoding="utf-8")
+
+        res = runner.invoke(
+            cli,
+            ["reconcile", "--input", str(fixture_file), "--provider", "bybit", "--as-of", "2026-08-23T14:05:00Z"],
+        )
+        assert res.exit_code == 4
+        data = json.loads(res.output)
+        assert data["outcome"] == Outcome.INVALID_INPUT.value
+        assert len(data["facts"]) == 0
+        assert any("only 'GET' is accepted" in i["message"] for i in data["issues"])
+
     def test_cli_facts_and_issues_filter(self, tmp_path: Path):
         runner = CliRunner()
         fixture = str(FIXTURES_DIR / "bybit_all_facts.jsonl")

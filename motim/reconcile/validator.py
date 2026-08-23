@@ -21,6 +21,10 @@ AUTH_KEY_PATTERNS = (
     "token",
     "secret",
     "password",
+    "passphrase",
+    "signature",
+    "session",
+    "credential",
     "bearer",
     "jwt",
     "apikey",
@@ -31,6 +35,8 @@ AUTH_KEY_PATTERNS = (
     "sec_websocket_key",
     "sec-websocket-key",
     "client_secret",
+    "auth",
+    "authentication",
 )
 
 # JWT / Canary / Secret value patterns
@@ -87,7 +93,20 @@ def contains_auth_elements(val: Any) -> bool:
             if BEARER_PATTERN.match(s) or JWT_PATTERN.match(s):
                 return True
             s_lower = s.lower()
-            if "canary" in s_lower and any(kw in s_lower for kw in ("token", "secret", "cookie", "key")):
+            if "canary" in s_lower and any(
+                kw in s_lower
+                for kw in (
+                    "token",
+                    "secret",
+                    "cookie",
+                    "key",
+                    "signature",
+                    "session",
+                    "credential",
+                    "passphrase",
+                    "auth",
+                )
+            ):
                 return True
         except Exception:
             pass
@@ -97,7 +116,20 @@ def contains_auth_elements(val: Any) -> bool:
             return True
         # Check for canary tokens or explicit secret patterns
         s_lower = s.lower()
-        if "canary" in s_lower and any(kw in s_lower for kw in ("token", "secret", "cookie", "key")):
+        if "canary" in s_lower and any(
+            kw in s_lower
+            for kw in (
+                "token",
+                "secret",
+                "cookie",
+                "key",
+                "signature",
+                "session",
+                "credential",
+                "passphrase",
+                "auth",
+            )
+        ):
             return True
     return False
 
@@ -245,6 +277,14 @@ def validate_sanitized_exchange(
             code="invalid_input",
             exchange_id=ex_id,
         )
+    normalized_method = method.strip().upper()
+    if normalized_method != "GET":
+        raise ValidationError(
+            f"Invalid request.method '{method}': only 'GET' is accepted for account-read reconciliation",
+            code="invalid_input",
+            exchange_id=ex_id,
+        )
+    req["method"] = normalized_method
     route_key = req.get("route_key")
     if not isinstance(route_key, str) or not route_key.strip():
         raise ValidationError(

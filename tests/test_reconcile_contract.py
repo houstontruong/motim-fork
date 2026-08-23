@@ -468,3 +468,74 @@ class TestGate1ContractRequirements:
             assert len(res.facts) == 0
             assert any(i.code == IssueCode.INVALID_INPUT.value for i in res.issues)
 
+    @pytest.mark.parametrize(
+        "invalid_method",
+        [
+            "POST",
+            "post",
+            "PUT",
+            "put",
+            "PATCH",
+            "patch",
+            "DELETE",
+            "delete",
+            "OPTIONS",
+            "HEAD",
+            "CONNECT",
+            "TRACE",
+            "UNKNOWN",
+        ],
+    )
+    def test_non_get_request_methods_rejected_with_invalid_input(self, invalid_method: str):
+        """Only GET is accepted for account-read reconciliation; mutating/non-GET methods return invalid_input with zero facts."""
+        exchange_dict = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": f"method-test-{invalid_method}",
+            "provider": "bybit",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": invalid_method, "route_key": "positions"},
+            "response": {
+                "status": 200,
+                "body": {"result": {"list": [{"symbol": "BTCUSDT", "side": "Buy", "size": "0.5", "entryPrice": "50000", "markPrice": "51000"}]}},
+            },
+        }
+
+        # 1. Validator directly
+        with pytest.raises(ValidationError) as exc:
+            validate_sanitized_exchange(exchange_dict, expected_provider="bybit")
+        assert exc.value.code == "invalid_input"
+        assert "GET" in str(exc.value)
+
+        # 2. Reconcile API
+        res = reconcile([exchange_dict], "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res.outcome == Outcome.INVALID_INPUT.value
+        assert len(res.facts) == 0
+        assert len(res.issues) >= 1
+        assert any("only 'GET' is accepted" in i.message for i in res.issues)
+
+        # 3. JSONL string format
+        jsonl_str = json.dumps(exchange_dict) + "\n"
+        res_jsonl = reconcile(jsonl_str, "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res_jsonl.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_jsonl.facts) == 0
+
+    @pytest.mark.parametrize("valid_method", ["GET", "get", "  GET  ", "  get  "])
+    def test_normalized_get_request_method_accepted(self, valid_method: str):
+        """Normalized GET methods ('GET', 'get', whitespace padded) are accepted and facts are produced."""
+        exchange_dict = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": "method-valid-get",
+            "provider": "bybit",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": valid_method, "route_key": "positions"},
+            "response": {
+                "status": 200,
+                "body": {"result": {"list": [{"symbol": "BTCUSDT", "side": "Buy", "size": "0.5", "entryPrice": "50000", "markPrice": "51000"}]}},
+            },
+        }
+        res = reconcile([exchange_dict], "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res.outcome == Outcome.OK.value
+        assert len(res.facts) == 1
+        assert res.facts[0].data["symbol"] == "BTCUSDT"
+
+

@@ -59,18 +59,26 @@ All 4 findings (1 HIGH, 2 MEDIUM, 1 LOW) from Round 3 have been resolved with fo
 | **Datetime `as_of` is falsely labeled UTC** | **MEDIUM** | Updated `engine.py` and `staleness.py` to reject naïve `datetime` inputs with structured `invalid_input`, convert aware non-UTC `datetime` inputs (`.astimezone(timezone.utc)`) to UTC RFC3339 `Z`, and evaluate physical staleness accurately. | `tests/test_reconcile_contract.py`<br>- `test_datetime_as_of_aware_utc_conversion_and_naive_rejection` testing naïve rejection, UTC-aware datetime, and non-UTC aware datetime (e.g. UTC-4) staleness evaluation. |
 | **Invalid direct API types bypass taxonomy** | **LOW** | Hardened `engine.py` direct API entrypoint to validate provider type (`isinstance(provider, str)`) and input exchanges type (`isinstance(exchanges, (Path, str, Iterable))`). Non-string provider and non-iterable exchange inputs return structured `invalid_input` instead of raising uncaught exceptions. | `tests/test_reconcile_contract.py`<br>- `test_invalid_direct_api_types_return_structured_invalid_input` testing invalid provider types (`None`, `int`, `bool`, `list`, `dict`) and exchanges types (`None`, `int`, `bool`, `object`). |
 
+### Round 4 Remediation (Latest Codex Audit Findings)
+Both defects identified in the Codex audit against commit `3ec9aa6` have been resolved with exhaustive regression tests:
+
+| Finding | Severity | Description & Remediation | Regression Tests |
+|---|---|---|---|
+| **Nested auth material is fail-open below metadata** | **HIGH** | Extended `AUTH_KEY_PATTERNS` in `validator.py` with `signature`, `session`, `credential`, `passphrase`, `auth`, and `authentication`; added canary value checks for these keys; enforced recursive fail-closed validation on all nested objects/arrays at any depth returning structured `invalid_input` with zero facts and no sentinel leakage. | `tests/test_reconcile_security.py`<br>- `test_nested_auth_material_key_families_rejected_below_metadata` verifying `signature`, `session_id`, `credentials`, `passphrase`, `sessionId`, `user_credentials`, `request_signature`, `api_passphrase` across Python API, JSONL strings, and CLI subprocess execution with sentinel canary leak verification. |
+| **Any non-empty request.method accepted** | **MEDIUM** | Enforced normalized `GET`-only validation for `request.method` in `validator.py`. Mutating methods (`POST`, `PUT`, `PATCH`, `DELETE`, etc.) are rejected with `invalid_input` and zero facts; valid variations (`GET`, `get`, padded whitespace) are normalized. | `tests/test_reconcile_contract.py`<br>- `test_non_get_request_methods_rejected_with_invalid_input` (parameterized across `POST`, `post`, `PUT`, `put`, `PATCH`, `patch`, `DELETE`, `delete`, `OPTIONS`, `HEAD`, `CONNECT`, `TRACE`, `UNKNOWN`)<br>- `test_normalized_get_request_method_accepted`<br>`tests/test_reconcile_cli.py`<br>- `test_cli_reconcile_non_get_method_exit_4`. |
+
 ---
 
 ## 3. Verification Gate Results (Gates 1 – 6)
 
 | Gate | Requirement | Verification Method | Status |
 |---|---|---|---|
-| **Gate 1: Contract Tests** | Valid/invalid schema, strict mode, decimal string canonicalization, non-finite rejection, source traceability, deterministic staleness, input-order independent deduplication, boolean status rejection, preserved line numbers, direct iterable/dict non-finite rejection, max age integer enforcement, bracket file paths, literal vs filename separation, aware datetime UTC conversion, direct API type taxonomy. | `tests/test_reconcile_contract.py`<br>- 20 test cases covering all contract specifications and audit regressions. | **PASSED** (20/20) ✅ |
+| **Gate 1: Contract Tests** | Valid/invalid schema, strict mode, decimal string canonicalization, non-finite rejection, source traceability, deterministic staleness, input-order independent deduplication, boolean status rejection, preserved line numbers, direct iterable/dict non-finite rejection, max age integer enforcement, bracket file paths, literal vs filename separation, aware datetime UTC conversion, direct API type taxonomy, non-GET method rejection, normalized GET acceptance. | `tests/test_reconcile_contract.py`<br>- 37 test cases covering all contract specifications and audit regressions. | **PASSED** (37/37) ✅ |
 | **Gate 2: Adapter Tests** | Bybit and Lighter adapters across all 6 fact types (`position`, `fill`, `funding`, `balance`, `equity`, `pnl`), malformed records, unknown route schemas, mixed recognized/unsupported batches. | `tests/test_reconcile_adapters.py`<br>- 5 test cases for Bybit and Lighter adapters. | **PASSED** (5/5) ✅ |
-| **Gate 3: CLI Smoke** | `motim reconcile`, `motim facts`, `motim issues` verifying stdout JSON format and exit codes `0`, `2`, `3`, `4`, including negative max age. | `tests/test_reconcile_cli.py`<br>- 10 test cases covering CLI smoke and edge cases. | **PASSED** (10/10) ✅ |
+| **Gate 3: CLI Smoke** | `motim reconcile`, `motim facts`, `motim issues` verifying stdout JSON format and exit codes `0`, `2`, `3`, `4`, including negative max age and non-GET method rejection. | `tests/test_reconcile_cli.py`<br>- 14 test cases covering CLI smoke and edge cases. | **PASSED** (14/14) ✅ |
 | **Gate 4: No-Network & No-Replay** | Static AST audit ensuring no network modules are imported in reconciliation code; subprocess execution under an active socket/DNS sabotaged guard; no request builders or replay mechanisms. | `tests/test_reconcile_no_network.py`<br>- 3 test cases auditing AST and running under active network sabotage guard. | **PASSED** (3/3) ✅ |
-| **Gate 5: Security Regression** | Ingestion of canary secret tokens across headers, cookies, query, body, duplicate-key bypass vectors, and nested container structures (tuples, sets, frozensets); assert zero leaks in output JSON, stderr, or reports. | `tests/test_reconcile_security.py`<br>- 6 test cases asserting zero secret sentinel leaks. | **PASSED** (6/6) ✅ |
-| **Gate 6: Full Suite** | Full test suite regression green. | `pytest` running all 178 test cases across the entire repository. | **PASSED** (178/178) ✅ |
+| **Gate 5: Security Regression** | Ingestion of canary secret tokens across headers, cookies, query, body, duplicate-key bypass vectors, nested container structures (tuples, sets, frozensets), and nested auth material key families (`signature`, `session_id`, `credentials`, `passphrase`); assert zero leaks in output JSON, stderr, or reports. | `tests/test_reconcile_security.py`<br>- 14 test cases asserting zero secret sentinel leaks. | **PASSED** (14/14) ✅ |
+| **Gate 6: Full Suite** | Full test suite regression green. | `pytest` running all 207 test cases across the entire repository. | **PASSED** (207/207) ✅ |
 
 ---
 
@@ -84,26 +92,26 @@ configfile: pyproject.toml
 testpaths: tests
 plugins: anyio-4.13.0, asyncio-1.3.0, timeout-2.4.0
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 178 items
+collected 207 items
 
-tests\test_auth.py .....................                                 [ 11%]
-tests\test_cli.py .................                                      [ 21%]
-tests\test_client.py ..                                                  [ 22%]
-tests\test_config.py ............                                        [ 29%]
-tests\test_diff.py .                                                     [ 29%]
-tests\test_egress.py ........                                            [ 34%]
-tests\test_exchange_db.py .....                                          [ 37%]
-tests\test_exchange_writer.py .                                          [ 37%]
-tests\test_gates.py ..................                                   [ 47%]
-tests\test_linkfinder_integration.py ..                                  [ 48%]
-tests\test_reconcile_adapters.py .....                                   [ 51%]
-tests\test_reconcile_cli.py ..........                                   [ 57%]
-tests\test_reconcile_contract.py ....................                    [ 68%]
+tests\test_auth.py .....................                                 [ 10%]
+tests\test_cli.py .................                                      [ 18%]
+tests\test_client.py ..                                                  [ 19%]
+tests\test_config.py ............                                        [ 25%]
+tests\test_diff.py .                                                     [ 25%]
+tests\test_egress.py ........                                            [ 29%]
+tests\test_exchange_db.py .....                                          [ 31%]
+tests\test_exchange_writer.py .                                          [ 32%]
+tests\test_gates.py ..................                                   [ 41%]
+tests\test_linkfinder_integration.py ..                                  [ 42%]
+tests\test_reconcile_adapters.py .....                                   [ 44%]
+tests\test_reconcile_cli.py ..............                               [ 51%]
+tests\test_reconcile_contract.py .....................................   [ 69%]
 tests\test_reconcile_no_network.py ...                                   [ 70%]
-tests\test_reconcile_security.py ......                                  [ 73%]
-tests\test_redaction.py .....                                            [ 76%]
-tests\test_service.py ........................                           [ 89%]
+tests\test_reconcile_security.py ..............                          [ 77%]
+tests\test_redaction.py .....                                            [ 79%]
+tests\test_service.py ........................                           [ 91%]
 tests\test_store.py ..................                                   [100%]
 
-============================= 178 passed in 5.70s =============================
+============================= 207 passed in 5.74s =============================
 ```

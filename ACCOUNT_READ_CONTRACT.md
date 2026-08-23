@@ -11,7 +11,8 @@ The Motim Account-Read Reconciliation layer translates local, pre-sanitized exch
 
 ### Non-Negotiable Safety Constraints:
 - **Offline Only:** Production modules contain no network imports (`socket`, `requests`, `httpx`, `urllib`, `aiohttp`, `websocket`, `mitmproxy`).
-- **No Auth / Secrets:** Input files are scanned recursively for auth-shaped fields (`authorization`, `cookie`, `token`, `secret`, `password`, JWTs, Bearer tokens). Any matching field causes immediate rejection (`invalid_input`, exit code 4) with redacted error messages that never echo secret values.
+- **No Auth / Secrets:** Input files are scanned recursively for auth-shaped fields (`authorization`, `cookie`, `token`, `secret`, `password`, `passphrase`, `signature`, `session_id`, `credentials`, JWTs, Bearer tokens). Any matching field or key anywhere in the input tree causes immediate rejection (`invalid_input`, exit code 4) with redacted error messages that never echo secret values.
+- **Read-Only HTTP Methods:** Only normalized `GET` is accepted for `request.method`; mutating methods (`POST`, `PUT`, `PATCH`, `DELETE`) are rejected with `invalid_input` (exit 4).
 - **Deterministic & Pure:** All calculations (decimal conversions, hashing, staleness) are deterministic and depend solely on explicit arguments. No system clock or environment access.
 - **Traceability:** Every produced fact maintains an explicit list of `source_exchange_ids` linking it back to the input fixture records.
 
@@ -45,7 +46,7 @@ Input is formatted as **JSON Lines (`.jsonl`)** where each line represents one v
 - `exchange_id` *(string, required)*: Unique identifier within the input file.
 - `provider` *(string, required)*: Exactly `"bybit"` or `"lighter"`.
 - `captured_at` *(string, required)*: RFC3339 UTC timestamp ending with `"Z"` (e.g. `2026-08-23T14:00:00Z`).
-- `request.method` *(string, required)*: HTTP method string (e.g. `"GET"`, `"POST"`).
+- `request.method` *(string, required)*: Normalized HTTP method string. Only `"GET"` is accepted for account-read reconciliation; mutating methods (`POST`, `PUT`, `PATCH`, `DELETE`) are rejected with `invalid_input`.
 - `request.route_key` *(string, required)*: Synthetic adapter route key (e.g. `"positions"`, `"fills"`, `"wallet_balance"`, `"funding_history"`, `"closed_pnl"`).
 - `response.status` *(integer, required)*: HTTP response status code (e.g. `200`).
 - `response.body` *(JSON object/array, required)*: Pre-sanitized response body payload.

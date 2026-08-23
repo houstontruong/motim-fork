@@ -183,3 +183,79 @@ class TestGate5SecurityRegression:
             for issue in res.issues:
                 assert sentinel not in issue.message, f"Sentinel {sentinel} leaked in issue message"
                 assert "[REDACTED]" in issue.message or "auth" in issue.message.lower()
+
+    @pytest.mark.parametrize(
+        "auth_key,sentinel_value",
+        [
+            ("signature", "CANARY_SIG_HEX_abcdef1234567890"),
+            ("session_id", "CANARY_SESS_ID_998877665544"),
+            ("credentials", "CANARY_CREDENTIALS_BLOB_AABBCC"),
+            ("passphrase", "CANARY_PASSPHRASE_SECRET_WORD"),
+            ("sessionId", "CANARY_CAMEL_SESSION_ID_112233"),
+            ("user_credentials", "CANARY_USER_CREDS_445566"),
+            ("request_signature", "CANARY_REQ_SIG_778899"),
+            ("api_passphrase", "CANARY_API_PASSPHRASE_001122"),
+        ],
+    )
+    def test_nested_auth_material_key_families_rejected_below_metadata(self, auth_key: str, sentinel_value: str, tmp_path: Path):
+        """Authentication material keys (signature, session_id, credentials, passphrase) below response.body.metadata are rejected with zero facts."""
+        # 1. Direct Python API (nested dictionary below response.body.metadata)
+        exchange_dict = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": f"nested-auth-{auth_key}-001",
+            "provider": "bybit",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": "positions"},
+            "response": {
+                "status": 200,
+                "body": {
+                    "result": {
+                        "list": [
+                            {
+                                "symbol": "BTCUSDT",
+                                "side": "Buy",
+                                "size": "0.5",
+                                "entryPrice": "50000",
+                                "markPrice": "51000",
+                            }
+                        ]
+                    },
+                    "metadata": {
+                        auth_key: sentinel_value,
+                        "request_context": {"trace_id": "trace-123"},
+                    },
+                },
+            },
+        }
+
+        res_api = reconcile([exchange_dict], "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res_api.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_api.facts) == 0
+        assert len(res_api.issues) >= 1
+        res_json = json.dumps(res_api.to_dict())
+        assert sentinel_value not in res_json
+        for issue in res_api.issues:
+            assert sentinel_value not in issue.message
+            assert "[REDACTED]" in issue.message or "auth" in issue.message.lower()
+
+        # 2. JSONL string / file format
+        jsonl_str = json.dumps(exchange_dict) + "\n"
+        res_jsonl = reconcile(jsonl_str, "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res_jsonl.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_jsonl.facts) == 0
+        assert sentinel_value not in json.dumps(res_jsonl.to_dict())
+
+        # 3. CLI execution via file
+        fixture_file = tmp_path / f"nested_{auth_key}.jsonl"
+        fixture_file.write_text(jsonl_str, encoding="utf-8")
+        runner = CliRunner()
+        cli_res = runner.invoke(
+            cli,
+            ["reconcile", "--input", str(fixture_file), "--provider", "bybit", "--as-of", "2026-08-23T14:05:00Z"],
+        )
+        assert cli_res.exit_code == 4
+        assert sentinel_value not in cli_res.output
+        cli_data = json.loads(cli_res.output)
+        assert cli_data["outcome"] == "invalid_input"
+        assert len(cli_data["facts"]) == 0
+
