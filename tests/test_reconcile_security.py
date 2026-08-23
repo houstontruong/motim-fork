@@ -197,6 +197,10 @@ class TestGate5SecurityRegression:
             ("request_signature", "CANARY_REQ_SIG_778899"),
             ("api_passphrase", "CANARY_API_PASSPHRASE_001122"),
             ("nonce", "CANARY_NONCE_VALUE_1234567890"),
+            ("n_o_n_c_e", "CANARY_SPLIT_UNDERSCORE_NONCE_123456"),
+            ("n-o-n-c-e", "CANARY_SPLIT_HYPHEN_NONCE_654321"),
+            ("x_n_o_n_c_e", "CANARY_SPLIT_X_UNDERSCORE_NONCE_778899"),
+            ("x-n-o-n-c-e", "CANARY_SPLIT_X_HYPHEN_NONCE_998877"),
             ("request_nonce", "CANARY_REQ_NONCE_9876543210"),
             ("api_nonce", "CANARY_API_NONCE_AABBCCDDEEFF"),
             ("client_nonce", "CANARY_CLIENT_NONCE_11223344"),
@@ -205,6 +209,8 @@ class TestGate5SecurityRegression:
             ("nonce_str", "CANARY_NONCE_STR_22334455"),
             ("Nonce", "CANARY_PASCAL_NONCE_66778899"),
             ("NONCE", "CANARY_UPPER_NONCE_00112233"),
+            ("N_O_N_C_E", "CANARY_UPPER_SPLIT_NONCE_112244"),
+            ("N-O-N-C-E", "CANARY_UPPER_HYPHEN_SPLIT_NONCE_442211"),
         ],
     )
     def test_nested_auth_material_key_families_rejected_below_metadata(self, auth_key: str, sentinel_value: str, tmp_path: Path):

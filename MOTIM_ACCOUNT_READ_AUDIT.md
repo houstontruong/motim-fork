@@ -89,3 +89,9 @@ Fix the remaining defect with targeted regressions:
 
 1. **HIGH — nested authentication material fail-open for nonce** (`validator.py:18`). A syntactically valid `GET` record with `response.body.metadata.nonce` (or normalized variants such as `request_nonce`, `api_nonce`, `client_nonce`, `x-nonce`, `x_nonce`, `nonce_str`) must be rejected recursively with structured redacted `invalid_input` and zero facts.
 
+## Round 6 — Redaction Consistency & Separator Normalization Remediation
+
+Fix the remaining defect with targeted regressions:
+
+1. **MEDIUM — redaction separator-normalization gap** (`motim/redact.py`). Synthetic keys `n_o_n_c_e` and `n-o-n-c-e` are rejected at reconciliation ingest, but could remain unredacted when `redact_header_value`, `redact_query_string`, or `redact_data_structure` is invoked independently. Apply a shared lowercase + hyphen/underscore-normalized sensitive-name match across all redaction paths.
+

@@ -124,6 +124,14 @@ _CANARY_TOKEN_PATTERN = re.compile(
 )
 
 
+def normalize_sensitive_name(name: Any) -> str:
+    """Normalize a header, query parameter, or field name for sensitive pattern matching.
+
+    Converts to lowercase and strips hyphens and underscores.
+    """
+    return str(name).lower().replace("-", "").replace("_", "")
+
+
 class Redactor:
     """Configurable fail-closed redaction engine for sanitizing captured traffic."""
 
@@ -145,12 +153,33 @@ class Redactor:
         self.sensitive_key_substrings = tuple(
             list(SENSITIVE_KEY_SUBSTRINGS) + [str(k).lower() for k in extra_key_substrings]
         )
+        self._normalized_sensitive_headers = frozenset(
+            normalize_sensitive_name(h) for h in self.sensitive_headers
+        )
+        self._normalized_sensitive_query_params = frozenset(
+            normalize_sensitive_name(p) for p in self.sensitive_query_params
+        )
+        self._normalized_sensitive_key_substrings = tuple(
+            normalize_sensitive_name(k) for k in self.sensitive_key_substrings
+        )
+
+    def is_sensitive_name(self, name: Any) -> bool:
+        """Check if a header, query parameter, or field name is sensitive under normalized matching."""
+        name_norm = normalize_sensitive_name(name)
+        if not name_norm:
+            return False
+        if (
+            name_norm in self._normalized_sensitive_query_params
+            or name_norm in self._normalized_sensitive_headers
+        ):
+            return True
+        return any(sub in name_norm for sub in self._normalized_sensitive_key_substrings)
 
     def redact_header_value(self, name: str, value: str) -> str:
         """Redact a header value based on header name and contents."""
-        name_lower = str(name).lower()
+        name_norm = normalize_sensitive_name(name)
 
-        if name_lower == "authorization":
+        if name_norm == "authorization":
             val_strip = str(value).strip()
             if val_strip.lower().startswith("bearer "):
                 return f"Bearer {self.placeholder}"
@@ -158,7 +187,7 @@ class Redactor:
                 return f"Basic {self.placeholder}"
             return self.placeholder
 
-        if name_lower in ("cookie", "set-cookie"):
+        if name_norm in ("cookie", "setcookie"):
             # Preserve cookie keys for schema/endpoint awareness, mask all values
             try:
                 cookies = parse_cookie_header(str(value))
@@ -169,11 +198,7 @@ class Redactor:
                 pass
             return self.placeholder
 
-        if name_lower in self.sensitive_headers:
-            return self.placeholder
-
-        # Check if header name contains sensitive words
-        if any(sub in name_lower for sub in ("token", "secret", "auth-", "api-key", "apikey", "signature", "nonce")):
+        if self.is_sensitive_name(name):
             return self.placeholder
 
         # Regex scan value for embedded JWTs, Bearer tokens, or private keys
@@ -223,10 +248,7 @@ class Redactor:
             redacted_pairs = []
             for k, v in pairs:
                 k_str = str(k)
-                k_lower = k_str.lower()
-                if k_lower in self.sensitive_query_params or any(
-                    sub in k_lower for sub in ("token", "secret", "pass", "key", "auth", "sig", "nonce")
-                ):
+                if self.is_sensitive_name(k_str):
                     redacted_pairs.append((k_str, self.placeholder))
                 else:
                     # Also sanitize value for JWT/Bearer
@@ -264,18 +286,11 @@ class Redactor:
         if isinstance(data, dict):
             out_dict: dict[Any, Any] = {}
             for k, v in data.items():
-                k_str = str(k)
-                k_lower = k_str.lower()
-                is_sensitive = (
-                    k_lower in self.sensitive_query_params
-                    or any(sub in k_lower for sub in self.sensitive_key_substrings)
-                )
-                if is_sensitive:
+                if self.is_sensitive_name(k):
                     out_dict[k] = self.placeholder
                 else:
                     out_dict[k] = self.redact_data_structure(v)
             return out_dict
-
 
         if isinstance(data, list):
             return [self.redact_data_structure(item) for item in data]
@@ -362,11 +377,7 @@ class Redactor:
             out_qp: dict[str, Any] = {}
             for k, v in out["query_params"].items():
                 k_str = str(k)
-                k_lower = k_str.lower()
-                if (
-                    k_lower in self.sensitive_query_params
-                    or any(sub in k_lower for sub in ("token", "secret", "pass", "key", "auth", "sig"))
-                ):
+                if self.is_sensitive_name(k_str):
                     out_qp[k_str] = self.placeholder
                 else:
                     out_qp[k_str] = self.redact_data_structure(v)

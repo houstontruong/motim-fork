@@ -113,6 +113,100 @@ def test_redactor_raw_body_bytes_redaction():
     assert redacted_mixed["token"] == "[REDACTED]"
 
 
+def test_redactor_separator_normalization_headers():
+    """Verify headers with underscores, hyphens, and mixed case are properly redacted."""
+    redactor = Redactor(profile="strict")
+
+    # Nonce variants
+    assert redactor.redact_header_value("nonce", "val_1") == "[REDACTED]"
+    assert redactor.redact_header_value("n_o_n_c_e", "val_2") == "[REDACTED]"
+    assert redactor.redact_header_value("n-o-n-c-e", "val_3") == "[REDACTED]"
+    assert redactor.redact_header_value("x-n-o-n-c-e", "val_4") == "[REDACTED]"
+    assert redactor.redact_header_value("x_n_o_n_c_e", "val_5") == "[REDACTED]"
+    assert redactor.redact_header_value("X-N-O-N-C-E", "val_6") == "[REDACTED]"
+    assert redactor.redact_header_value("N_O_N_C_E", "val_7") == "[REDACTED]"
+    assert redactor.redact_header_value("request_nonce", "val_8") == "[REDACTED]"
+    assert redactor.redact_header_value("api_nonce", "val_9") == "[REDACTED]"
+
+    # Other sensitive header variants
+    assert redactor.redact_header_value("s_e_c_r_e_t", "val_10") == "[REDACTED]"
+    assert redactor.redact_header_value("t_o_k_e_n", "val_11") == "[REDACTED]"
+    assert redactor.redact_header_value("a_p_i_k_e_y", "val_12") == "[REDACTED]"
+    assert redactor.redact_header_value("p_a_s_s_w_o_r_d", "val_13") == "[REDACTED]"
+    assert redactor.redact_header_value("a_u_t_h", "val_14") == "[REDACTED]"
+
+    # Non-sensitive header preserved
+    assert redactor.redact_header_value("Content-Type", "application/json") == "application/json"
+    assert redactor.redact_header_value("Accept-Encoding", "gzip, deflate") == "gzip, deflate"
+
+
+def test_redactor_separator_normalization_query_string():
+    """Verify query strings with separator-split keys are sanitized."""
+    redactor = Redactor(profile="strict")
+
+    qs = "n_o_n_c_e=sec_nonce_1&n-o-n-c-e=sec_nonce_2&x_n_o_n_c_e=sec_nonce_3&public_param=ok_val"
+    redacted = redactor.redact_query_string(qs)
+    assert redacted is not None
+    assert "sec_nonce_1" not in redacted
+    assert "sec_nonce_2" not in redacted
+    assert "sec_nonce_3" not in redacted
+    assert "public_param=ok_val" in redacted
+    assert "n_o_n_c_e=%5BREDACTED%5D" in redacted or "n_o_n_c_e=[REDACTED]" in redacted
+    assert "n-o-n-c-e=%5BREDACTED%5D" in redacted or "n-o-n-c-e=[REDACTED]" in redacted
+
+    url = "https://api.example.com/v1/query?n_o_n_c_e=top_secret_123&regular=hello"
+    redacted_url = redactor.redact_url(url)
+    assert redacted_url is not None
+    assert "top_secret_123" not in redacted_url
+    assert "regular=hello" in redacted_url
+
+
+def test_redactor_separator_normalization_data_structure():
+    """Verify nested data structures containing split-nonce and sensitive keys are redacted."""
+    redactor = Redactor(profile="strict")
+
+    payload = {
+        "response": {
+            "body": {
+                "result": {"positions": [{"symbol": "BTCUSDT", "size": "1.0"}]},
+                "metadata": {
+                    "nonce": "sec_normal_nonce",
+                    "n_o_n_c_e": "sec_split_nonce_1",
+                    "n-o-n-c-e": "sec_split_nonce_2",
+                    "x_n_o_n_c_e": "sec_split_nonce_3",
+                    "x-n-o-n-c-e": "sec_split_nonce_4",
+                    "s_e_c_r_e_t": "sec_split_secret",
+                    "p_a_s_s_w_o_r_d": "sec_split_password",
+                    "t_o_k_e_n": "sec_split_token",
+                    "normal_field": "safe_data",
+                },
+            }
+        }
+    }
+
+    redacted = redactor.redact_data_structure(payload)
+    meta = redacted["response"]["body"]["metadata"]
+    assert meta["nonce"] == "[REDACTED]"
+    assert meta["n_o_n_c_e"] == "[REDACTED]"
+    assert meta["n-o-n-c-e"] == "[REDACTED]"
+    assert meta["x_n_o_n_c_e"] == "[REDACTED]"
+    assert meta["x-n-o-n-c-e"] == "[REDACTED]"
+    assert meta["s_e_c_r_e_t"] == "[REDACTED]"
+    assert meta["p_a_s_s_w_o_r_d"] == "[REDACTED]"
+    assert meta["t_o_k_e_n"] == "[REDACTED]"
+    assert meta["normal_field"] == "safe_data"
+    assert redacted["response"]["body"]["result"]["positions"][0]["symbol"] == "BTCUSDT"
+
+    # Also test byte payload redaction
+    json_bytes = json.dumps(payload).encode("utf-8")
+    redacted_bytes = redactor.redact_body_bytes(json_bytes, "application/json")
+    assert redacted_bytes is not None
+    assert b"sec_split_nonce_1" not in redacted_bytes
+    assert b"sec_split_nonce_2" not in redacted_bytes
+    assert b"sec_split_secret" not in redacted_bytes
+    assert b"safe_data" in redacted_bytes
+
+
 
 def test_pipeline_redaction_before_persistence(tmp_path: Path):
     spec_dir = tmp_path / "specs"
