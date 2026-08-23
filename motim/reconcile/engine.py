@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from collections.abc import Iterable
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .adapters import get_adapter
 from .dedup import deduplicate_facts
@@ -35,8 +36,19 @@ def _reject_non_finite_constant(val: str) -> Any:
     raise NonFiniteNumericError("Non-finite JSON numeric constant detected [REDACTED]")
 
 
+def _format_as_of_display(as_of: Any) -> str:
+    if isinstance(as_of, datetime):
+        if as_of.tzinfo is not None and as_of.tzinfo.utcoffset(as_of) is not None:
+            as_of_utc = as_of.astimezone(timezone.utc)
+            if as_of_utc.microsecond:
+                return as_of_utc.strftime("%Y-%m-%dT%H:%M:%S") + f".{as_of_utc.microsecond:06d}".rstrip("0") + "Z"
+            return as_of_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+        return str(as_of)
+    return str(as_of) if as_of is not None else ""
+
+
 def _parse_input_exchanges(
-    exchanges: list[dict[str, Any]] | Iterable[dict[str, Any]] | str | Path,
+    exchanges: Any,
 ) -> tuple[list[dict[str, Any]], list[Issue]]:
     """Parse JSON Lines string, file path, or iterable of exchange dicts."""
     issues: list[Issue] = []
@@ -57,28 +69,20 @@ def _parse_input_exchanges(
         return _parse_jsonl_string(content)
 
     if isinstance(exchanges, str):
-        # Prefer a safe Path.is_file() attempt with OSError handling before choosing literal parsing
-        try:
-            path_candidate = Path(exchanges)
-            if path_candidate.is_file():
-                try:
-                    content = path_candidate.read_text(encoding="utf-8")
-                    return _parse_jsonl_string(content)
-                except Exception as e:
-                    return [], [
-                        Issue(
-                            code=IssueCode.INVALID_INPUT.value,
-                            provider="",
-                            source_exchange_id=None,
-                            severity=Severity.ERROR.value,
-                            message=f"Failed to read input file: {e}",
-                        )
-                    ]
-        except (OSError, ValueError):
-            pass
         return _parse_jsonl_string(exchanges)
 
-    # It's an iterable / list of dicts
+    if not isinstance(exchanges, Iterable):
+        return [], [
+            Issue(
+                code=IssueCode.INVALID_INPUT.value,
+                provider="",
+                source_exchange_id=None,
+                severity=Severity.ERROR.value,
+                message=f"exchanges must be a Path, str, or iterable of dicts, got {type(exchanges).__name__}",
+            )
+        ]
+
+    # It's an iterable / list of items
     records: list[dict[str, Any]] = []
     for idx, item in enumerate(exchanges):
         if not isinstance(item, dict):
@@ -181,11 +185,30 @@ def reconcile(
 
     Pure-functional, deterministic, offline-only engine. No network or clock access.
     """
+    as_of_display = _format_as_of_display(as_of)
+
+    # Validate provider type
+    if not isinstance(provider, str):
+        return AccountReadResult(
+            provider=str(provider) if provider is not None else "",
+            as_of=as_of_display,
+            outcome=Outcome.INVALID_INPUT.value,
+            facts=[],
+            issues=[
+                Issue(
+                    code=IssueCode.INVALID_INPUT.value,
+                    provider=str(provider) if provider is not None else "",
+                    source_exchange_id=None,
+                    severity=Severity.ERROR.value,
+                    message=f"provider must be a string, got {type(provider).__name__}",
+                )
+            ],
+        )
+
     prov = provider.lower().strip()
 
     # Validate max_age_seconds
     if isinstance(max_age_seconds, bool) or not isinstance(max_age_seconds, int) or max_age_seconds < 0:
-        as_of_display = as_of.strftime("%Y-%m-%dT%H:%M:%SZ") if isinstance(as_of, datetime) else str(as_of)
         return AccountReadResult(
             provider=prov,
             as_of=as_of_display,
@@ -204,7 +227,27 @@ def reconcile(
 
     # Validate as_of format
     if isinstance(as_of, datetime):
-        as_of_str = as_of.strftime("%Y-%m-%dT%H:%M:%SZ")
+        if as_of.tzinfo is None or as_of.tzinfo.utcoffset(as_of) is None:
+            return AccountReadResult(
+                provider=prov,
+                as_of=str(as_of),
+                outcome=Outcome.INVALID_INPUT.value,
+                facts=[],
+                issues=[
+                    Issue(
+                        code=IssueCode.INVALID_INPUT.value,
+                        provider=prov,
+                        source_exchange_id=None,
+                        severity=Severity.ERROR.value,
+                        message="as_of datetime must be timezone-aware (naïve datetimes are rejected)",
+                    )
+                ],
+            )
+        as_of_utc = as_of.astimezone(timezone.utc)
+        if as_of_utc.microsecond:
+            as_of_str = as_of_utc.strftime("%Y-%m-%dT%H:%M:%S") + f".{as_of_utc.microsecond:06d}".rstrip("0") + "Z"
+        else:
+            as_of_str = as_of_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     elif isinstance(as_of, str):
         try:
             parse_rfc3339_z(as_of)
@@ -228,7 +271,7 @@ def reconcile(
     else:
         return AccountReadResult(
             provider=prov,
-            as_of=str(as_of),
+            as_of=str(as_of) if as_of is not None else "",
             outcome=Outcome.INVALID_INPUT.value,
             facts=[],
             issues=[
@@ -237,7 +280,7 @@ def reconcile(
                     provider=prov,
                     source_exchange_id=None,
                     severity=Severity.ERROR.value,
-                    message="as_of must be an RFC3339 string or datetime",
+                    message=f"as_of must be an RFC3339 string or timezone-aware datetime, got {type(as_of).__name__}",
                 )
             ],
         )

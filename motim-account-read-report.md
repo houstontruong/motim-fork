@@ -40,8 +40,8 @@ All 7 findings (2 HIGH, 4 MEDIUM, 1 LOW) from Round 1 were resolved with targete
 | **Direct JSONL strings throw during path probing** | **MEDIUM** | Updated `_parse_input_exchanges` to bypass path probing for JSON-prefixed/multiline strings and wrapped probing in `try...except (OSError, ValueError)`. | `tests/test_reconcile_contract.py`<br>- `test_direct_jsonl_long_string_and_special_chars` verifying long JSONL strings and arbitrary strings without `OSError`. |
 | **Syntax line numbers lose leading blank lines** | **LOW** | Changed `_parse_jsonl_string` to avoid stripping the full string before `splitlines()`, preserving original physical source line numbering. | `tests/test_reconcile_contract.py`<br>- `test_source_line_numbering_with_leading_blank_lines` verifying line 4 error reporting when preceded by blank lines. |
 
-### Round 2 Remediation (Commit Follow-Up)
-All 3 findings (2 MEDIUM, 1 LOW) from Round 2 have been resolved with focused regression tests:
+### Round 2 Remediation (Commit `e4a3d6f`)
+All 3 findings (2 MEDIUM, 1 LOW) from Round 2 were resolved with focused regression tests:
 
 | Finding | Severity | Description & Remediation | Regression Tests |
 |---|---|---|---|
@@ -49,18 +49,28 @@ All 3 findings (2 MEDIUM, 1 LOW) from Round 2 have been resolved with focused re
 | **Library `max_age_seconds` accepts non-integer/non-finite numbers** | **MEDIUM** | Enforced strict non-negative integer validation (`type is int and >= 0`, rejecting `bool`, `float`, `NaN`, `Infinity`, strings) at both library boundary (`reconcile()`) and `check_staleness()`. | `tests/test_reconcile_contract.py`<br>- `test_reconcile_max_age_seconds_rejects_floats_and_non_finites` testing floats (`10.5`), non-finites (`nan`, `inf`), Decimals, bools, and negative values. |
 | **Ambiguous valid file paths treated as literal JSONL** | **LOW** | Safely attempted `Path.is_file()` inside `try...except (OSError, ValueError)` prior to literal JSON parsing fallback, ensuring valid files starting with `{` or containing special characters are properly read as files. | `tests/test_reconcile_contract.py`<br>- `test_path_handling_with_brackets_and_special_names` verifying files named `"{bybit_bracket_test}.jsonl"` are successfully resolved and reconciled. |
 
+### Round 3 Remediation (Commit Follow-Up)
+All 4 findings (1 HIGH, 2 MEDIUM, 1 LOW) from Round 3 have been resolved with focused regression tests:
+
+| Finding | Severity | Description & Remediation | Regression Tests |
+|---|---|---|---|
+| **Direct API secret scan skips tuples/sets** | **HIGH** | Extended `contains_auth_elements` (and `contains_non_finite_values`) in `validator.py` to recursively inspect all collections (`tuple`, `set`, `frozenset`, `Sequence`, `Set`, `Mapping`, and `bytes`). Nested containers with secrets return structured `invalid_input` without exposing secret sentinels. | `tests/test_reconcile_security.py`<br>- `test_secret_scan_nested_tuples_and_sets_rejected_and_never_leaked` testing nested tuples, sets, and frozensets in request/response bodies with secret sentinels. |
+| **Literal JSONL conflicts with an existing filename** | **MEDIUM** | Enforced strict type-based separation in `engine.py`: explicit `Path` objects are read from filesystem, whereas `str` inputs are always parsed directly as literal JSON/JSONL strings and never probe same-named files on disk. CLI continues to supply `Path` objects. | `tests/test_reconcile_contract.py`<br>- `test_literal_jsonl_string_does_not_read_same_named_file` verifying working-directory file named `{}` is never read when passing literal string `"{}"`.<br>- `test_path_handling_with_brackets_and_special_names` verifying explicit `Path` inputs. |
+| **Datetime `as_of` is falsely labeled UTC** | **MEDIUM** | Updated `engine.py` and `staleness.py` to reject naïve `datetime` inputs with structured `invalid_input`, convert aware non-UTC `datetime` inputs (`.astimezone(timezone.utc)`) to UTC RFC3339 `Z`, and evaluate physical staleness accurately. | `tests/test_reconcile_contract.py`<br>- `test_datetime_as_of_aware_utc_conversion_and_naive_rejection` testing naïve rejection, UTC-aware datetime, and non-UTC aware datetime (e.g. UTC-4) staleness evaluation. |
+| **Invalid direct API types bypass taxonomy** | **LOW** | Hardened `engine.py` direct API entrypoint to validate provider type (`isinstance(provider, str)`) and input exchanges type (`isinstance(exchanges, (Path, str, Iterable))`). Non-string provider and non-iterable exchange inputs return structured `invalid_input` instead of raising uncaught exceptions. | `tests/test_reconcile_contract.py`<br>- `test_invalid_direct_api_types_return_structured_invalid_input` testing invalid provider types (`None`, `int`, `bool`, `list`, `dict`) and exchanges types (`None`, `int`, `bool`, `object`). |
+
 ---
 
 ## 3. Verification Gate Results (Gates 1 – 6)
 
 | Gate | Requirement | Verification Method | Status |
 |---|---|---|---|
-| **Gate 1: Contract Tests** | Valid/invalid schema, strict mode, decimal string canonicalization, non-finite rejection, source traceability, deterministic staleness, input-order independent deduplication, boolean status rejection, preserved line numbers, direct iterable/dict non-finite rejection, max age integer enforcement, bracket file paths. | `tests/test_reconcile_contract.py`<br>- 17 test cases covering all contract specifications and audit regressions. | **PASSED** (17/17) ✅ |
+| **Gate 1: Contract Tests** | Valid/invalid schema, strict mode, decimal string canonicalization, non-finite rejection, source traceability, deterministic staleness, input-order independent deduplication, boolean status rejection, preserved line numbers, direct iterable/dict non-finite rejection, max age integer enforcement, bracket file paths, literal vs filename separation, aware datetime UTC conversion, direct API type taxonomy. | `tests/test_reconcile_contract.py`<br>- 20 test cases covering all contract specifications and audit regressions. | **PASSED** (20/20) ✅ |
 | **Gate 2: Adapter Tests** | Bybit and Lighter adapters across all 6 fact types (`position`, `fill`, `funding`, `balance`, `equity`, `pnl`), malformed records, unknown route schemas, mixed recognized/unsupported batches. | `tests/test_reconcile_adapters.py`<br>- 5 test cases for Bybit and Lighter adapters. | **PASSED** (5/5) ✅ |
 | **Gate 3: CLI Smoke** | `motim reconcile`, `motim facts`, `motim issues` verifying stdout JSON format and exit codes `0`, `2`, `3`, `4`, including negative max age. | `tests/test_reconcile_cli.py`<br>- 10 test cases covering CLI smoke and edge cases. | **PASSED** (10/10) ✅ |
 | **Gate 4: No-Network & No-Replay** | Static AST audit ensuring no network modules are imported in reconciliation code; subprocess execution under an active socket/DNS sabotaged guard; no request builders or replay mechanisms. | `tests/test_reconcile_no_network.py`<br>- 3 test cases auditing AST and running under active network sabotage guard. | **PASSED** (3/3) ✅ |
-| **Gate 5: Security Regression** | Ingestion of canary secret tokens across headers, cookies, query, body, and duplicate-key bypass vectors; assert zero leaks in output JSON, stderr, or reports. | `tests/test_reconcile_security.py`<br>- 5 test cases asserting zero secret sentinel leaks. | **PASSED** (5/5) ✅ |
-| **Gate 6: Full Suite** | Full test suite regression green. | `pytest` running all 174 test cases across the entire repository. | **PASSED** (174/174) ✅ |
+| **Gate 5: Security Regression** | Ingestion of canary secret tokens across headers, cookies, query, body, duplicate-key bypass vectors, and nested container structures (tuples, sets, frozensets); assert zero leaks in output JSON, stderr, or reports. | `tests/test_reconcile_security.py`<br>- 6 test cases asserting zero secret sentinel leaks. | **PASSED** (6/6) ✅ |
+| **Gate 6: Full Suite** | Full test suite regression green. | `pytest` running all 178 test cases across the entire repository. | **PASSED** (178/178) ✅ |
 
 ---
 
@@ -74,26 +84,26 @@ configfile: pyproject.toml
 testpaths: tests
 plugins: anyio-4.13.0, asyncio-1.3.0, timeout-2.4.0
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 174 items
+collected 178 items
 
-tests\test_auth.py .....................                                 [ 12%]
+tests\test_auth.py .....................                                 [ 11%]
 tests\test_cli.py .................                                      [ 21%]
 tests\test_client.py ..                                                  [ 22%]
 tests\test_config.py ............                                        [ 29%]
-tests\test_diff.py .                                                     [ 30%]
-tests\test_egress.py ........                                            [ 35%]
+tests\test_diff.py .                                                     [ 29%]
+tests\test_egress.py ........                                            [ 34%]
 tests\test_exchange_db.py .....                                          [ 37%]
-tests\test_exchange_writer.py .                                          [ 38%]
-tests\test_gates.py ..................                                   [ 48%]
-tests\test_linkfinder_integration.py ..                                  [ 50%]
-tests\test_reconcile_adapters.py .....                                   [ 52%]
-tests\test_reconcile_cli.py ..........                                   [ 58%]
-tests\test_reconcile_contract.py .................                       [ 68%]
+tests\test_exchange_writer.py .                                          [ 37%]
+tests\test_gates.py ..................                                   [ 47%]
+tests\test_linkfinder_integration.py ..                                  [ 48%]
+tests\test_reconcile_adapters.py .....                                   [ 51%]
+tests\test_reconcile_cli.py ..........                                   [ 57%]
+tests\test_reconcile_contract.py ....................                    [ 68%]
 tests\test_reconcile_no_network.py ...                                   [ 70%]
-tests\test_reconcile_security.py .....                                   [ 72%]
-tests\test_redaction.py .....                                            [ 75%]
+tests\test_reconcile_security.py ......                                  [ 73%]
+tests\test_redaction.py .....                                            [ 76%]
 tests\test_service.py ........................                           [ 89%]
 tests\test_store.py ..................                                   [100%]
 
-============================= 174 passed in 5.42s =============================
+============================= 178 passed in 5.70s =============================
 ```

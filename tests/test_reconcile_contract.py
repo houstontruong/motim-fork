@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from decimal import Decimal
 import pytest
@@ -372,7 +373,7 @@ class TestGate1ContractRequirements:
             assert any(i.code == IssueCode.INVALID_INPUT.value for i in res.issues)
 
     def test_path_handling_with_brackets_and_special_names(self, tmp_path: Path):
-        """Existing file paths starting with '{' or containing brackets are read as files rather than literal JSON."""
+        """Explicit Path objects starting with '{' or containing brackets are read as files."""
         valid_jsonl = (
             '{"schema_version": "motim.sanitized_exchange.v1", "exchange_id": "bracket-path-1", '
             '"provider": "bybit", "captured_at": "2026-08-23T14:00:00Z", '
@@ -382,8 +383,88 @@ class TestGate1ContractRequirements:
         bracket_file = tmp_path / "{bybit_bracket_test}.jsonl"
         bracket_file.write_text(valid_jsonl, encoding="utf-8")
 
-        # Pass path as string
-        res = reconcile(str(bracket_file), "bybit", as_of="2026-08-23T14:05:00Z")
+        # Pass explicit Path object
+        res = reconcile(bracket_file, "bybit", as_of="2026-08-23T14:05:00Z")
         assert res.outcome == Outcome.OK.value
         assert len(res.facts) == 1
         assert res.facts[0].source_exchange_ids == ["bracket-path-1"]
+
+    def test_literal_jsonl_string_does_not_read_same_named_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        """A literal JSON/JSONL string must never silently read a same-named file in the working directory."""
+        # Create a file named '{}' in the working directory containing valid record
+        monkeypatch.chdir(tmp_path)
+        valid_jsonl_in_file = (
+            '{"schema_version": "motim.sanitized_exchange.v1", "exchange_id": "file-bracket-content", '
+            '"provider": "bybit", "captured_at": "2026-08-23T14:00:00Z", '
+            '"request": {"method": "GET", "route_key": "positions"}, '
+            '"response": {"status": 200, "body": {"result": {"list": [{"symbol": "BTCUSDT", "side": "Buy", "size": "0.5", "entryPrice": "50000", "markPrice": "51000"}]}}}}\n'
+        )
+        file_named_bracket = tmp_path / "{}"
+        file_named_bracket.write_text(valid_jsonl_in_file, encoding="utf-8")
+        assert file_named_bracket.is_file()
+
+        # 1. Pass literal string "{}" -> MUST be treated as literal input "{}" and NOT read file "{}"
+        res_literal = reconcile("{}", "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res_literal.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_literal.facts) == 0
+        assert not any("file-bracket-content" in str(f.source_exchange_ids) for f in res_literal.facts)
+
+        # 2. Pass explicit Path object -> reads the file
+        res_path = reconcile(file_named_bracket, "bybit", as_of="2026-08-23T14:05:00Z")
+        assert res_path.outcome == Outcome.OK.value
+        assert len(res_path.facts) == 1
+        assert res_path.facts[0].source_exchange_ids == ["file-bracket-content"]
+
+    def test_datetime_as_of_aware_utc_conversion_and_naive_rejection(self):
+        """as_of rejects naïve datetimes, and converts aware non-UTC datetimes to UTC before evaluating staleness."""
+        fixture_path = FIXTURES_DIR / "bybit_all_facts.jsonl"
+
+        # 1. Naïve datetime is rejected
+        as_of_naive = datetime(2026, 8, 23, 14, 5, 0)
+        res_naive = reconcile(fixture_path, "bybit", as_of=as_of_naive)
+        assert res_naive.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_naive.facts) == 0
+        assert any("timezone-aware" in i.message.lower() for i in res_naive.issues)
+
+        # 2. Aware UTC datetime
+        as_of_utc = datetime(2026, 8, 23, 14, 5, 0, tzinfo=timezone.utc)
+        res_utc = reconcile(fixture_path, "bybit", as_of=as_of_utc, max_age_seconds=600)
+        assert res_utc.outcome == Outcome.OK.value
+        assert res_utc.as_of == "2026-08-23T14:05:00Z"
+        assert len(res_utc.facts) >= 5
+
+        # 3. Aware non-UTC datetime (e.g. UTC-4 / EDT: 10:05:00-04:00 is 14:05:00Z)
+        tz_edt = timezone(timedelta(hours=-4))
+        as_of_edt = datetime(2026, 8, 23, 10, 5, 0, tzinfo=tz_edt)
+        res_edt = reconcile(fixture_path, "bybit", as_of=as_of_edt, max_age_seconds=600)
+        assert res_edt.outcome == Outcome.OK.value
+        assert res_edt.as_of == "2026-08-23T14:05:00Z"
+        assert len(res_edt.facts) >= 5
+        # Facts captured at 14:00:00Z are 300s old, so with max_age=600s they are fresh
+        assert not any(i.code == IssueCode.STALE_FACT.value for i in res_edt.issues)
+
+        # With max_age=100s, facts are stale (300s > 100s)
+        res_stale = reconcile(fixture_path, "bybit", as_of=as_of_edt, max_age_seconds=100)
+        assert res_stale.outcome == Outcome.OK.value
+        assert any(i.code == IssueCode.STALE_FACT.value for i in res_stale.issues)
+
+    def test_invalid_direct_api_types_return_structured_invalid_input(self):
+        """Invalid types for provider and exchanges return structured invalid_input without throwing exceptions."""
+        fixture_path = FIXTURES_DIR / "bybit_all_facts.jsonl"
+
+        # 1. Invalid provider types
+        bad_providers = [None, 123, True, ["bybit"], {"provider": "bybit"}, object()]
+        for bad_p in bad_providers:
+            res = reconcile(fixture_path, provider=bad_p, as_of="2026-08-23T14:05:00Z")  # type: ignore[arg-type]
+            assert res.outcome == Outcome.INVALID_INPUT.value
+            assert len(res.facts) == 0
+            assert any(i.code == IssueCode.INVALID_INPUT.value for i in res.issues)
+
+        # 2. Invalid exchanges types
+        bad_exchanges = [None, 123, True, object()]
+        for bad_e in bad_exchanges:
+            res = reconcile(exchanges=bad_e, provider="bybit", as_of="2026-08-23T14:05:00Z")  # type: ignore[arg-type]
+            assert res.outcome == Outcome.INVALID_INPUT.value
+            assert len(res.facts) == 0
+            assert any(i.code == IssueCode.INVALID_INPUT.value for i in res.issues)
+

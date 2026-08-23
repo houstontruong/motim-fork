@@ -110,3 +110,76 @@ class TestGate5SecurityRegression:
         )
         assert cli_res.exit_code == 4
         assert sentinel not in cli_res.output
+
+    def test_secret_scan_nested_tuples_and_sets_rejected_and_never_leaked(self):
+        """Direct API input with secret sentinels inside nested tuples, sets, and frozensets must be rejected without leaks."""
+        sentinel_tuple = "CANARY_SECRET_IN_TUPLE_998811"
+        sentinel_set = "CANARY_SECRET_IN_SET_887722"
+        sentinel_frozenset = "CANARY_SECRET_IN_FROZENSET_776633"
+
+        # 1. Nested tuple in response body
+        exchange_tuple = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": "secret-tuple-001",
+            "provider": "bybit",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": "positions"},
+            "response": {
+                "status": 200,
+                "body": {
+                    "nested_items": (f"Bearer {sentinel_tuple}", "regular_item"),
+                },
+            },
+        }
+
+        # 2. Nested set in response body
+        exchange_set = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": "secret-set-001",
+            "provider": "bybit",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": "positions"},
+            "response": {
+                "status": 200,
+                "body": {
+                    "tags": {sentinel_set, "tag_clean"},
+                },
+            },
+        }
+
+        # 3. Nested frozenset in request
+        exchange_frozenset = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": "secret-frozenset-001",
+            "provider": "bybit",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {
+                "method": "GET",
+                "route_key": "positions",
+            },
+            "response": {
+                "status": 200,
+                "body": {
+                    "auth_elements": frozenset([f"Bearer {sentinel_frozenset}"]),
+                },
+            },
+        }
+
+        for ex_dict, sentinel in [
+            (exchange_tuple, sentinel_tuple),
+            (exchange_set, sentinel_set),
+            (exchange_frozenset, sentinel_frozenset),
+        ]:
+            res = reconcile([ex_dict], "bybit", as_of="2026-08-23T14:05:00Z")
+            assert res.outcome == Outcome.INVALID_INPUT.value
+            assert len(res.facts) == 0
+
+            # Audit full result serialization
+            res_json = json.dumps(res.to_dict())
+            assert sentinel not in res_json, f"Sentinel {sentinel} leaked in result JSON"
+
+            # Audit issues
+            assert len(res.issues) >= 1
+            for issue in res.issues:
+                assert sentinel not in issue.message, f"Sentinel {sentinel} leaked in issue message"
+                assert "[REDACTED]" in issue.message or "auth" in issue.message.lower()

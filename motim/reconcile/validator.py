@@ -8,6 +8,8 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+from collections.abc import Mapping, Sequence, Set
+
 from .models import SCHEMA_VERSION_INPUT
 
 RFC3339_Z_REGEX = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$")
@@ -65,20 +67,30 @@ def parse_rfc3339_z(ts: str) -> datetime:
 
 
 def contains_auth_elements(val: Any) -> bool:
-    """Recursively check for auth-shaped field names or secret values in a JSON structure."""
-    if isinstance(val, dict):
+    """Recursively check for auth-shaped field names or secret values in a structure."""
+    if isinstance(val, (dict, Mapping)):
         for k, v in val.items():
             k_norm = str(k).lower().replace("-", "").replace("_", "")
             for pattern in AUTH_KEY_PATTERNS:
                 pat_norm = pattern.replace("-", "").replace("_", "")
                 if pat_norm in k_norm:
                     return True
-            if contains_auth_elements(v):
+            if contains_auth_elements(k) or contains_auth_elements(v):
                 return True
-    elif isinstance(val, list):
+    elif isinstance(val, (list, tuple, set, frozenset, Sequence, Set)) and not isinstance(val, (str, bytes, bytearray)):
         for item in val:
             if contains_auth_elements(item):
                 return True
+    elif isinstance(val, (bytes, bytearray)):
+        try:
+            s = val.decode("utf-8", errors="replace").strip()
+            if BEARER_PATTERN.match(s) or JWT_PATTERN.match(s):
+                return True
+            s_lower = s.lower()
+            if "canary" in s_lower and any(kw in s_lower for kw in ("token", "secret", "cookie", "key")):
+                return True
+        except Exception:
+            pass
     elif isinstance(val, str):
         s = val.strip()
         if BEARER_PATTERN.match(s) or JWT_PATTERN.match(s):
@@ -92,11 +104,11 @@ def contains_auth_elements(val: Any) -> bool:
 
 def contains_non_finite_values(val: Any) -> bool:
     """Recursively check for non-finite float or Decimal values."""
-    if isinstance(val, dict):
-        for v in val.values():
-            if contains_non_finite_values(v):
+    if isinstance(val, (dict, Mapping)):
+        for k, v in val.items():
+            if contains_non_finite_values(k) or contains_non_finite_values(v):
                 return True
-    elif isinstance(val, (list, tuple, set)):
+    elif isinstance(val, (list, tuple, set, frozenset, Sequence, Set)) and not isinstance(val, (str, bytes, bytearray)):
         for item in val:
             if contains_non_finite_values(item):
                 return True

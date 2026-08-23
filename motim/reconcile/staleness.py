@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Sequence
 
 from .models import Fact, Issue, IssueCode, Severity
@@ -22,9 +22,11 @@ def check_staleness(
     if isinstance(as_of, str):
         as_of_dt = parse_rfc3339_z(as_of)
     elif isinstance(as_of, datetime):
-        as_of_dt = as_of
+        if as_of.tzinfo is None or as_of.tzinfo.utcoffset(as_of) is None:
+            raise ValueError("as_of datetime must be timezone-aware (naïve datetimes are rejected)")
+        as_of_dt = as_of.astimezone(timezone.utc)
     else:
-        raise ValueError("as_of must be an RFC3339 string or datetime instance")
+        raise ValueError("as_of must be an RFC3339 string or timezone-aware datetime instance")
 
     if isinstance(max_age_seconds, bool) or not isinstance(max_age_seconds, int) or max_age_seconds < 0:
         raise ValueError("max_age_seconds must be a non-negative integer")
