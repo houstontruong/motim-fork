@@ -40,6 +40,8 @@ except PackageNotFoundError:  # pragma: no cover
 # Core classes
 from .auth import Auth
 from .diff import diff_exchanges
+from .discovery import EndpointSummary, ServiceDiscovery, discover, discover_services
+from .redact import Redactor, get_redactor
 
 # Convenience functions
 from .client import AsyncClient, Client, delete, get, patch, post, put
@@ -75,14 +77,21 @@ __all__ = [
     # Store
     "Store",
     "get_store",
+    # Redaction
+    "Redactor",
+    "get_redactor",
     # Auth
     "Auth",
-    # Service
+    # Service & Discovery
     "Service",
     "Sample",
     "SampleCollection",
     "SampleComparison",
     "EndpointCollection",
+    "discover",
+    "discover_services",
+    "ServiceDiscovery",
+    "EndpointSummary",
     # Client
     "Client",
     "AsyncClient",

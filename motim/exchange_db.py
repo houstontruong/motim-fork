@@ -112,12 +112,24 @@ class ExchangeDB:
     """SQLite exchange database."""
 
     def __init__(self, path: Path, *, max_body_bytes: int = 1_000_000):
+        import os
+
         self.path = Path(path).expanduser()
         self.max_body_bytes = max_body_bytes
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            try:
+                self.path.parent.chmod(0o700)
+            except Exception:
+                pass
         self._conn = sqlite3.connect(self.path)
         self._conn.row_factory = sqlite3.Row
         self._init_db()
+        if os.name != "nt":
+            try:
+                self.path.chmod(0o600)
+            except Exception:
+                pass
 
     def close(self) -> None:
         self._conn.close()

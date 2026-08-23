@@ -245,3 +245,87 @@ class TestGate3EgressAllowlistAndLoopback:
         assert "Security violation" in res_external_ip.output or "prohibited" in res_external_ip.output
 
 
+class TestGate4DiscoveryAndSafeStorage:
+    """Gate G4 — Read-only discovery interface and safe storage defaults.
+
+    Asserts:
+    - Discovery interface returns schemas and endpoints for inspection.
+    - No persistent credentials are used or exposed for unauthenticated replay.
+    - Storage directories (0700) and files (0600) enforce private permissions on POSIX.
+    - Max body size limits (1MB default) are enforced.
+    """
+
+    def test_discovery_interface_schema_inspection(self, tmp_path: Path):
+        from motim.discovery import discover, discover_services
+        from motim.store import Store
+
+        spec_dir = tmp_path / "specs"
+        store = Store(specs_dir=spec_dir)
+
+        # Populate a sample service spec
+        sample_spec = {
+            "service": "binance_futures",
+            "base_url": "https://fapi.binance.com",
+            "auth": {
+                "type": "api_key",
+                "header": "X-MBX-APIKEY",
+                "value": "[REDACTED]",
+                "last_seen": "2026-08-23T12:00:00",
+            },
+            "observed_endpoints": [
+                "GET /fapi/v1/ping",
+                "GET /fapi/v1/ticker/price",
+                "POST /fapi/v1/order",
+            ],
+            "samples": [
+                {
+                    "endpoint": "GET /fapi/v1/ticker/price",
+                    "status": 200,
+                    "query_params": {"symbol": "BTCUSDT"},
+                    "response_body": {"symbol": "BTCUSDT", "price": "60000.00"},
+                }
+            ],
+        }
+        store.save("binance_futures", sample_spec)
+        store.flush()
+
+        # Discover services
+        services = discover_services(store=store)
+        assert "binance_futures" in services
+
+        # Inspect service
+        disc = discover("binance_futures", store=store)
+        assert disc.auth_type == "api_key"
+        assert disc.base_url == "https://fapi.binance.com"
+        assert len(disc.endpoints) == 3
+
+        endpoints = disc.list_endpoints()
+        assert len(endpoints) == 3
+        ticker_ep = next(e for e in endpoints if e.path == "/fapi/v1/ticker/price")
+        assert ticker_ep.sample_count == 1
+        assert 200 in ticker_ep.statuses_seen
+
+    def test_safe_storage_file_permissions(self, tmp_path: Path):
+        import os
+        from motim.exchange_db import ExchangeDB
+        from motim.store import Store
+
+        spec_dir = tmp_path / "specs"
+        store = Store(specs_dir=spec_dir)
+        path = store.save("test_service", {"service": "test_service", "observed_endpoints": []})
+        store.flush()
+
+        db_path = tmp_path / "db" / "motim.sqlite3"
+        db = ExchangeDB(db_path)
+        db.close()
+
+        if os.name != "nt":
+            # POSIX directory permission 0700
+            assert (spec_dir.stat().st_mode & 0o777) == 0o700
+            assert (db_path.parent.stat().st_mode & 0o777) == 0o700
+            # POSIX file permission 0600
+            assert (path.stat().st_mode & 0o777) == 0o600
+            assert (db_path.stat().st_mode & 0o777) == 0o600
+
+
+

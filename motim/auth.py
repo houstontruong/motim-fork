@@ -30,14 +30,24 @@ class Auth:
     _headers: dict[str, str] = field(default_factory=dict)
     _cookies: dict[str, str] = field(default_factory=dict)
     _last_seen: datetime | None = None
+    _type_hint: str | None = None
     _config: Config = field(default_factory=get_config)
 
     @classmethod
     def from_spec(cls, spec: dict[str, Any], config: Config | None = None) -> Auth:
         """Create Auth from a spec dictionary."""
         auth_data = spec.get("auth", {})
-        headers = auth_data.get("headers", {})
+        headers_data = auth_data.get("headers", {})
         cookies_data = auth_data.get("cookies", {})
+        type_hint = auth_data.get("type")
+
+        headers: dict[str, str] = {}
+        if isinstance(headers_data, dict):
+            headers.update({str(k): str(v) for k, v in headers_data.items()})
+
+        # Also check single header/value format
+        if "header" in auth_data and "value" in auth_data:
+            headers[str(auth_data["header"])] = str(auth_data["value"])
 
         last_seen = None
         if "last_seen" in auth_data:
@@ -51,7 +61,7 @@ class Auth:
             cookies = {str(k): str(v) for k, v in cookies_data.items()}
 
         # Back-compat: if cookies aren't stored separately, derive them from the header.
-        if not cookies and isinstance(headers, dict):
+        if not cookies and headers:
             cookie_header = None
             for k, v in headers.items():
                 if k.lower() == "cookie":
@@ -61,9 +71,10 @@ class Auth:
                 cookies = parse_cookie_header(cookie_header)
 
         return cls(
-            _headers=dict(headers),
+            _headers=headers,
             _cookies=cookies,
             _last_seen=last_seen,
+            _type_hint=type_hint,
             _config=config or get_config(),
         )
 
@@ -195,22 +206,12 @@ class Auth:
             return ""
         return format_cookie_header(cookies)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Analysis
-    # ─────────────────────────────────────────────────────────────────────────
-
     @property
     def type(self) -> str:
-        """Detect primary authentication type.
+        """Detect primary authentication type."""
+        if self._type_hint and self._type_hint != "none":
+            return self._type_hint
 
-        Returns one of:
-        - 'bearer': Bearer token in Authorization header
-        - 'api_key': API key header present
-        - 'basic': Basic auth
-        - 'cookie': Cookie-based session
-        - 'custom': Has headers but none of above patterns
-        - 'none': No auth headers captured
-        """
         if self.bearer_token:
             return "bearer"
 

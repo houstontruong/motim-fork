@@ -109,7 +109,14 @@ class Store:
 
     def __post_init__(self):
         """Ensure specs directory exists and start flush thread."""
+        import os
+
         self.specs_dir.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            try:
+                self.specs_dir.chmod(0o700)
+            except Exception:
+                pass
         _start_flush_thread(self.specs_dir)
 
     @property
@@ -122,6 +129,10 @@ class Store:
         with _cache_lock:
             cached_services = set(_cache.keys())
         return sorted(disk_services | cached_services)
+
+    def list_services(self) -> list[str]:
+        """Return list of all captured service names."""
+        return self.services
 
     def find(self, query: str) -> list[str]:
         """Find services matching a query (fuzzy match)."""
