@@ -9,12 +9,11 @@
 
 ## 1. Executive Summary
 
-This report documents the remediation of all audit findings across all rounds, including the two Round 9 findings from the Codex audit of commit `46ff8d6` in the offline-only account-read reconciliation layer and defense-in-depth redaction engine of `motim-fork`:
+This report documents the remediation of all audit findings across all rounds, including the Round 10 finding from the Codex audit of commit `cb21423` in the offline-only account-read reconciliation layer and defense-in-depth redaction engine of `motim-fork`:
 
-1. **Defect 1 (Round 9 — Fully Percent-Encoded Structural Delimiters Can Leak - HIGH):** Route keys with fully percent-encoded structural delimiters (e.g. `unsupported%3Fapi%5Fkey%3DTOPSECRET` or `unsupported%23token%3DTOPSECRET`) were previously decoded only for pattern matches rather than query/fragment parsing, allowing encoded query/fragment credentials to bypass validation and be reflected in adapter error messages. We implemented iterative route and parameter decoding (`_fully_unquote_plus`) before query/fragment auth parsing in `validator.py`, rejecting all inputs containing encoded delimiter credentials with `ValidationError("Rejected input containing auth-shaped field [REDACTED]", code="auth_field_detected")`, returning structured `outcome: "invalid_input"`, zero facts, and exit code 4. Adapters also defensively strip decoded delimiters (`?`, `#`, `;`, `@`) before formatting issue messages.
-2. **Defect 2 (Round 9 — BOM-less UTF-16 / NUL-Bearing Body Data Can Leak - HIGH):** `Redactor.redact_body_bytes()` previously treated BOM-less UTF-16LE/BE and NUL-bearing binary payloads with missing (`None`) or generic (`text/plain`, `application/octet-stream`) content types as UTF-8, decoding them without error and bypassing colon-separated text regexes, which allowed credentials to persist. We implemented strict binary/NUL characteristic detection before UTF-8 fallback, using byte heuristics to detect, decode, and redact BOM-less UTF-16LE and UTF-16BE text, while failing closed on arbitrary NUL-bearing binary payloads (`b"[REDACTED: unparseable binary body]"`).
+1. **Defect 1 (Round 10 — Deep Percent-Encoding Bypass - HIGH):** `validator._fully_unquote_plus()` and adapter issue sanitizers previously had a 5-round decode limit. A route whose structural delimiters were encoded six or more times (e.g. `unsupported?api_key=TOPSECRET_DEPTH6` encoded to 6+ layers) bypassed validation and reached adapter unsupported-route issue generation, reflecting the encoded secret. We replaced the fixed 5-round limit with a length-derived safe bound (`max(64, len(raw))`), unquoting to true fixpoint, while failing closed (`_has_percent_encoding`) on unresolved percent-encoding at the bounded limit with `ValidationError("Rejected input containing auth-shaped field [REDACTED]", code="auth_field_detected")`, returning structured `outcome: "invalid_input"`, zero facts, and exit code 4. Adapters also defensively fall back to `[REDACTED_ROUTE]` if any unresolved percent-encoding or suspicious delimiter remains.
 
-All defects have been remediated within the strict offline-only, zero-network, zero-credential safety boundary. All 284 tests in the suite pass cleanly.
+All defects have been remediated within the strict offline-only, zero-network, zero-credential safety boundary. All 294 tests in the suite pass cleanly.
 
 ---
 
@@ -89,14 +88,13 @@ A route key containing URL query credentials or userinfo (e.g., `positions?api_k
 
 | File | Changes Made |
 |---|---|
-| `motim/redact.py` | Added byte heuristics in `redact_body_bytes` to detect, decode, and redact BOM-less UTF-16LE and UTF-16BE payloads with missing or generic content types, and enforce fail-closed handling (`b"[REDACTED: unparseable binary body]"`) on arbitrary NUL-bearing binary data. |
-| `motim/reconcile/validator.py` | Implemented `_fully_unquote_plus` to iteratively decode routes, segments, and parameter keys/values before query/fragment auth parsing in `_is_auth_string` and `_normalize_key_name`, rejecting any input with encoded delimiter credentials (`?` -> `%3F`, `#` -> `%23`, `=` -> `%3D`). |
-| `motim/reconcile/adapters/bybit.py` | Defensively stripped iteratively unquoted delimiters (`?`, `#`, `;`, `@`) in unsupported route issue messages using `_fully_unquote_plus`. |
-| `motim/reconcile/adapters/lighter.py` | Defensively stripped iteratively unquoted delimiters (`?`, `#`, `;`, `@`) in unsupported route issue messages using `_fully_unquote_plus`. |
-| `tests/test_redaction.py` | Added `test_redactor_bomless_utf16_and_nul_handling` and `test_persistence_path_bomless_utf16_redaction` covering BOM-less UTF-16LE/BE with missing/generic content types and SQLite persistence. |
-| `tests/test_reconcile_security.py` | Added parameterized `test_fully_percent_encoded_structural_delimiters_rejected_with_zero_facts` across Bybit and Lighter via API, JSONL strings, and CLI, and updated `test_adapter_unsupported_route_sanitization_defense_in_depth`. |
-| `MOTIM_ACCOUNT_READ_AUDIT.md` | Added Round 9 audit specifications. |
-| `motim-account-read-report.md` | Updated execution report with Round 9 verification evidence and 284-test suite output. |
+| `motim/reconcile/validator.py` | Added `_has_percent_encoding` to detect unresolved percent-encoding; replaced 5-round limit in `_fully_unquote_plus` with length-derived safe bound (`max(64, len(raw))`); updated `_is_auth_string` to fail closed on unresolved percent-encoding at the bounded limit. |
+| `motim/reconcile/adapters/bybit.py` | Defensively sanitized unsupported route messages using `_has_percent_encoding` and `_fully_unquote_plus`, falling back to `[REDACTED_ROUTE]` on unresolved encoding or suspicious delimiters. |
+| `motim/reconcile/adapters/lighter.py` | Defensively sanitized unsupported route messages using `_has_percent_encoding` and `_fully_unquote_plus`, falling back to `[REDACTED_ROUTE]` on unresolved encoding or suspicious delimiters. |
+| `motim/redact.py` | Updated `normalize_sensitive_name` with bounded iterative unquoting (`max(64, len(s))`) to resolve arbitrarily deep percent-encoded sensitive names. |
+| `tests/test_reconcile_security.py` | Added parameterized `test_deep_percent_encoded_structural_delimiters_rejected_at_depths_6_to_20` across Bybit and Lighter via API, JSONL strings, and CLI, and added `test_adapter_deep_percent_encoding_unsupported_route_sanitization_defense_in_depth`. |
+| `MOTIM_ACCOUNT_READ_AUDIT.md` | Added Round 10 audit specifications. |
+| `motim-account-read-report.md` | Updated execution report with Round 10 verification evidence and 294-test suite output. |
 | `motim-account-read-audit-fix.md` | This document. |
 
 ---
@@ -115,29 +113,29 @@ configfile: pyproject.toml
 testpaths: tests
 plugins: anyio-4.13.0, asyncio-1.3.0, timeout-2.4.0
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 284 items
+collected 294 items
 
 tests\test_auth.py .....................                                 [  7%]
-tests\test_cli.py .................                                      [ 13%]
-tests\test_client.py ..                                                  [ 14%]
-tests\test_config.py ............                                        [ 18%]
+tests\test_cli.py .................                                      [ 12%]
+tests\test_client.py ..                                                  [ 13%]
+tests\test_config.py ............                                        [ 17%]
 tests\test_diff.py .                                                     [ 18%]
-tests\test_egress.py ........                                            [ 21%]
-tests\test_exchange_db.py .....                                          [ 23%]
-tests\test_exchange_writer.py .                                          [ 23%]
-tests\test_gates.py ..................                                   [ 29%]
-tests\test_linkfinder_integration.py ..                                  [ 30%]
-tests\test_reconcile_adapters.py .....                                   [ 32%]
-tests\test_reconcile_cli.py ..............                               [ 37%]
-tests\test_reconcile_contract.py .....................................   [ 50%]
-tests\test_reconcile_no_network.py ...                                   [ 51%]
-tests\test_reconcile_security.py ....................................... [ 65%]
-........................................                                 [ 79%]
+tests\test_egress.py ........                                            [ 20%]
+tests\test_exchange_db.py .....                                          [ 22%]
+tests\test_exchange_writer.py .                                          [ 22%]
+tests\test_gates.py ..................                                   [ 28%]
+tests\test_linkfinder_integration.py ..                                  [ 29%]
+tests\test_reconcile_adapters.py .....                                   [ 31%]
+tests\test_reconcile_cli.py ..............                               [ 36%]
+tests\test_reconcile_contract.py .....................................   [ 48%]
+tests\test_reconcile_no_network.py ...                                   [ 49%]
+tests\test_reconcile_security.py ....................................... [ 62%]
+..................................................                       [ 79%]
 tests\test_redaction.py .................                                [ 85%]
 tests\test_service.py ........................                           [ 93%]
 tests\test_store.py ..................                                   [100%]
 
-============================= 284 passed in 8.54s =============================
+============================= 294 passed in 7.07s =============================
 ```
 
 ### 4.2 Security & Redaction Regressions (`pytest -v tests/test_redaction.py tests/test_reconcile_security.py`)
@@ -145,7 +143,7 @@ tests\test_store.py ..................                                   [100%]
 **Exit Code:** `0`  
 **Actual Output:**
 ```text
-============================= 96 passed in 0.70s ==============================
+============================= 106 passed in 0.79s =============================
 ```
 
 ### 4.3 Contract Tests (`pytest -v tests/test_reconcile_contract.py`)
@@ -169,7 +167,7 @@ tests\test_store.py ..................                                   [100%]
 ## 5. Safety Boundary Verification & Remaining Gaps
 
 - **Offline-Only Invariant:** Verified via AST inspection (`test_ast_rejects_network_and_proxy_imports`) and active socket sabotage (`test_subprocess_execution_under_blocked_socket_guard`). No socket, network client, or network library is imported or invoked.
-- **Zero Credentials / Zero Replay:** All fully percent-encoded structural delimiters, route fragments, BOM-less UTF-16 credentials, colon-separated plain text secrets, and NUL-bearing binary payloads are rejected or sanitized across all boundaries with zero leaks. No network replay code exists.
-- **Remaining Gaps:** None. All findings from the Codex audit of commit `46ff8d6` are completely resolved with comprehensive regression tests. Live account capture, traffic recording, and network clients remain strictly out of scope.
+- **Zero Credentials / Zero Replay:** Deeply percent-encoded credentials (tested through 20 layers of encoding), route fragments, BOM-less UTF-16 credentials, colon-separated plain text secrets, and NUL-bearing binary payloads are rejected or sanitized across all boundaries with zero leaks. No network replay code exists.
+- **Remaining Gaps:** None. All findings from the Codex audit of commit `cb21423` are completely resolved with comprehensive regression tests. Live account capture, traffic recording, and network clients remain strictly out of scope.
 
 

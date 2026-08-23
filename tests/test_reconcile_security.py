@@ -635,6 +635,145 @@ class TestGate5SecurityRegression:
         assert cli_out["outcome"] == "invalid_input"
         assert len(cli_out["facts"]) == 0
 
+    @pytest.mark.parametrize(
+        "provider,raw_pattern,depth,sentinel",
+        [
+            ("bybit", "unsupported?api_key={secret}", 6, "TOPSECRET_DEPTH6_BYBIT"),
+            ("bybit", "unsupported?token={secret}", 7, "TOPSECRET_DEPTH7_BYBIT"),
+            ("bybit", "positions?api_key={secret}", 8, "TOPSECRET_DEPTH8_BYBIT"),
+            ("bybit", "positions#secret={secret}", 10, "TOPSECRET_DEPTH10_BYBIT"),
+            ("bybit", "unsupported#password={secret}", 15, "TOPSECRET_DEPTH15_BYBIT"),
+            ("lighter", "trades?api_key={secret}", 6, "TOPSECRET_DEPTH6_LIGHTER"),
+            ("lighter", "account_positions#token={secret}", 7, "TOPSECRET_DEPTH7_LIGHTER"),
+            ("lighter", "unsupported?secret={secret}", 10, "TOPSECRET_DEPTH10_LIGHTER"),
+            ("lighter", "unsupported#password={secret}", 20, "TOPSECRET_DEPTH20_LIGHTER"),
+        ],
+    )
+    def test_deep_percent_encoded_structural_delimiters_rejected_at_depths_6_to_20(
+        self, provider: str, raw_pattern: str, depth: int, sentinel: str, tmp_path: Path
+    ):
+        """Routes with multi-layer percent-encoded delimiters at depths 6 to 20 are rejected with invalid_input and zero facts."""
+        # Construct deeply percent-encoded route key
+        # Start with unencoded route
+        curr = raw_pattern.format(secret=sentinel)
+        # Apply depth layers of percent-encoding to structural delimiters / route
+        for _ in range(depth):
+            res_parts = []
+            for b in curr.encode("utf-8"):
+                if (65 <= b <= 90) or (97 <= b <= 122) or (48 <= b <= 57) or b in (45, 46, 95, 126):
+                    res_parts.append(chr(b))
+                else:
+                    res_parts.append(f"%{b:02X}")
+            curr = "".join(res_parts)
+        deep_route = curr
+
+        body_content = (
+            {"result": {"list": [{"symbol": "BTCUSDT", "side": "Buy", "size": "1.0", "entryPrice": "50000", "markPrice": "50500"}]}}
+            if provider == "bybit"
+            else {"code": 200, "data": {"positions": [{"market_id": "BTC", "side": "LONG", "size": "1.0", "entry_price": "50000", "mark_price": "50500"}]}}
+        )
+        record = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": f"deep-enc-{provider}-d{depth}",
+            "provider": provider,
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": deep_route},
+            "response": {
+                "status": 200,
+                "body": body_content,
+            },
+        }
+
+        # 1. Direct Python API
+        res_api = reconcile([record], provider, as_of="2026-08-23T14:05:00Z")
+        assert res_api.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_api.facts) == 0
+        assert len(res_api.issues) >= 1
+        res_json = json.dumps(res_api.to_dict())
+        assert sentinel not in res_json
+        for issue in res_api.issues:
+            assert sentinel not in issue.message
+            assert "[REDACTED]" in issue.message or "auth" in issue.message.lower()
+
+        # 2. JSONL string API
+        raw_jsonl = json.dumps(record) + "\n"
+        res_jsonl = reconcile(raw_jsonl, provider, as_of="2026-08-23T14:05:00Z")
+        assert res_jsonl.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_jsonl.facts) == 0
+        assert sentinel not in json.dumps(res_jsonl.to_dict())
+
+        # 3. CLI execution
+        fixture_file = tmp_path / f"deep_enc_{provider}_d{depth}.jsonl"
+        fixture_file.write_text(raw_jsonl, encoding="utf-8")
+        runner = CliRunner()
+        cli_res = runner.invoke(
+            cli,
+            ["reconcile", "--input", str(fixture_file), "--provider", provider, "--as-of", "2026-08-23T14:05:00Z"],
+        )
+        assert cli_res.exit_code == 4
+        assert sentinel not in cli_res.output
+        cli_out = json.loads(cli_res.output)
+        assert cli_out["outcome"] == "invalid_input"
+        assert len(cli_out["facts"]) == 0
+
+    def test_adapter_deep_percent_encoding_unsupported_route_sanitization_defense_in_depth(self):
+        """Adapters defensively sanitize routes with 6+ layers of percent-encoding."""
+        from motim.reconcile.adapters.bybit import BybitAdapter
+        from motim.reconcile.adapters.lighter import LighterAdapter
+
+        bybit = BybitAdapter()
+        lighter = LighterAdapter()
+
+        canary_d6 = "CANARY_ADAPTER_DEPTH6_SECRET_9988"
+        canary_d12 = "CANARY_ADAPTER_DEPTH12_SECRET_7766"
+
+        # Construct 6-layer encoded route for Bybit
+        curr6 = f"unsupported_route?api_key={canary_d6}"
+        for _ in range(6):
+            parts = []
+            for b in curr6.encode("utf-8"):
+                if (65 <= b <= 90) or (97 <= b <= 122) or (48 <= b <= 57) or b in (45, 46, 95, 126):
+                    parts.append(chr(b))
+                else:
+                    parts.append(f"%{b:02X}")
+            curr6 = "".join(parts)
+
+        bybit_exchange = {
+            "exchange_id": "bybit-deep-001",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": curr6},
+            "response": {"status": 200, "body": {}},
+        }
+        res_bybit = bybit.reconcile_exchange(bybit_exchange)
+        assert not res_bybit.is_supported
+        assert len(res_bybit.issues) == 1
+        assert canary_d6 not in res_bybit.issues[0].message
+        assert res_bybit.issues[0].message == "Bybit route 'unsupported_route' is not supported"
+
+        # Construct 12-layer encoded route for Lighter
+        curr12 = f"unsupported_route#token={canary_d12}"
+        for _ in range(12):
+            parts = []
+            for b in curr12.encode("utf-8"):
+                if (65 <= b <= 90) or (97 <= b <= 122) or (48 <= b <= 57) or b in (45, 46, 95, 126):
+                    parts.append(chr(b))
+                else:
+                    parts.append(f"%{b:02X}")
+            curr12 = "".join(parts)
+
+        lighter_exchange = {
+            "exchange_id": "lighter-deep-001",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": curr12},
+            "response": {"status": 200, "body": {}},
+        }
+        res_lighter = lighter.reconcile_exchange(lighter_exchange)
+        assert not res_lighter.is_supported
+        assert len(res_lighter.issues) == 1
+        assert canary_d12 not in res_lighter.issues[0].message
+        assert res_lighter.issues[0].message == "Lighter route 'unsupported_route' is not supported"
+
+
 
 
 

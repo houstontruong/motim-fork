@@ -127,11 +127,15 @@ _CANARY_TOKEN_PATTERN = re.compile(
 def normalize_sensitive_name(name: Any) -> str:
     """Normalize a header, query parameter, or field name for sensitive pattern matching.
 
-    Unquotes percent-encoded characters, converts to lowercase, and strips hyphens and underscores.
+    Iteratively unquotes percent-encoded characters until fixpoint, converts to lowercase,
+    and strips hyphens and underscores.
     """
     s = str(name)
     try:
-        for _ in range(3):
+        limit = max(64, len(s))
+        for _ in range(limit):
+            if "%" not in s and "+" not in s:
+                break
             unq = unquote_plus(s)
             if unq == s:
                 break

@@ -119,6 +119,13 @@ Fix both confidentiality findings with targeted regressions:
 1. **HIGH — Fully percent-encoded structural delimiters can leak** (`motim/reconcile/validator.py`, `adapters/bybit.py`, `adapters/lighter.py`). Iteratively decode complete routes and segments before auth parsing to reject routes with encoded delimiters (e.g., `unsupported%3Fapi%5Fkey%3DTOPSECRET` or `unsupported%23token%3DTOPSECRET`) with `invalid_input` and zero facts, and defensively strip decoded structural delimiters from unsupported route messages.
 2. **HIGH — BOM-less UTF-16/NUL-bearing body data can leak** (`motim/redact.py`). Detect NUL bytes and binary characteristics before plain text UTF-8 fallback; decode BOM-less UTF-16LE/BE via byte heuristics, sanitize credentials, and fail closed on arbitrary NUL-bearing binary payloads (`b"[REDACTED: unparseable binary body]"`).
 
+## Round 10 — Deep-Encoding Remediation
+
+Fix deep percent-encoding bypass finding with targeted regressions:
+
+1. **HIGH — Deep percent-encoding bypass** (`motim/reconcile/validator.py`, `adapters/bybit.py`, `adapters/lighter.py`, `motim/redact.py`). Decode multi-layer percent-encoded strings to true fixpoint with input length-derived safe bound (`max(64, len(raw))`), fail closed on unresolved percent-encoding after the bounded decode limit (`_has_percent_encoding`), and defensively sanitize route issue messages in Bybit and Lighter adapters with `[REDACTED_ROUTE]` fallback.
+
+
 
 
 

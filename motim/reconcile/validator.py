@@ -99,10 +99,32 @@ def _unquote_plus(s: Any) -> str:
     return res.decode("utf-8", errors="replace")
 
 
-def _fully_unquote_plus(s: Any, max_rounds: int = 5) -> str:
-    """Iteratively unquote percent-encoded characters until fixpoint."""
+def _has_percent_encoding(s: str) -> bool:
+    """Check if string contains valid percent-encoded triples %XX."""
+    if "%" not in s:
+        return False
+    parts = s.split("%")
+    for p in parts[1:]:
+        if len(p) >= 2:
+            try:
+                int(p[:2], 16)
+                return True
+            except ValueError:
+                pass
+    return False
+
+
+def _fully_unquote_plus(s: Any, max_rounds: int | None = None) -> str:
+    """Iteratively unquote percent-encoded characters until true fixpoint.
+
+    A bounded decode limit derived from input length prevents runaway loops while
+    reliably resolving arbitrary multi-layer nested percent-encodings.
+    """
     raw = str(s)
-    for _ in range(max_rounds):
+    if "%" not in raw and "+" not in raw:
+        return raw
+    limit = max_rounds if max_rounds is not None else max(64, len(raw))
+    for _ in range(limit):
         if "%" not in raw and "+" not in raw:
             break
         unq = _unquote_plus(raw)
@@ -124,6 +146,10 @@ def _is_auth_string(raw: str) -> bool:
         return False
 
     s_unq = _fully_unquote_plus(s_raw).strip()
+
+    # Fail closed on unresolved percent encoding after bounded decode
+    if _has_percent_encoding(s_unq):
+        return True
 
     # 1. Bearer / JWT on raw or iteratively decoded strings
     for candidate in (s_raw, s_unq):
