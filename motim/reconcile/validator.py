@@ -73,6 +73,46 @@ def parse_rfc3339_z(ts: str) -> datetime:
     return datetime.fromisoformat(ts[:-1] + "+00:00")
 
 
+def _unquote_plus(s: Any) -> str:
+    """Pure-Python URL unquoting without importing urllib (ensuring offline reconciliation contract)."""
+    raw = str(s)
+    if "%" not in raw and "+" not in raw:
+        return raw
+    raw = raw.replace("+", " ")
+    parts = raw.split("%")
+    if len(parts) == 1:
+        return raw
+    res = bytearray()
+    res.extend(parts[0].encode("utf-8", errors="replace"))
+    for item in parts[1:]:
+        if len(item) >= 2:
+            try:
+                hex_byte = int(item[:2], 16)
+                res.append(hex_byte)
+                res.extend(item[2:].encode("utf-8", errors="replace"))
+            except ValueError:
+                res.append(ord("%"))
+                res.extend(item.encode("utf-8", errors="replace"))
+        else:
+            res.append(ord("%"))
+            res.extend(item.encode("utf-8", errors="replace"))
+    return res.decode("utf-8", errors="replace")
+
+
+def _normalize_key_name(k: Any) -> str:
+    """Normalize a key name by unquoting percent-encoded characters, lowercasing, and stripping hyphens/underscores."""
+    s = str(k)
+    try:
+        for _ in range(3):
+            unq = _unquote_plus(s)
+            if unq == s:
+                break
+            s = unq
+    except Exception:
+        pass
+    return s.lower().replace("-", "").replace("_", "")
+
+
 def _is_auth_string(raw: str) -> bool:
     s = raw.strip()
     if not s:
@@ -80,30 +120,41 @@ def _is_auth_string(raw: str) -> bool:
     if BEARER_PATTERN.search(s) or JWT_PATTERN.search(s):
         return True
 
-    s_lower = s.lower()
-    if "canary" in s_lower and any(
-        kw in s_lower
-        for kw in (
-            "token",
-            "secret",
-            "cookie",
-            "key",
-            "signature",
-            "session",
-            "credential",
-            "passphrase",
-            "auth",
-            "nonce",
-        )
-    ):
-        return True
+    # Check unquoted raw string for Bearer or JWT
+    try:
+        s_unq = _unquote_plus(s)
+        if BEARER_PATTERN.search(s_unq) or JWT_PATTERN.search(s_unq):
+            return True
+    except Exception:
+        s_unq = s
 
-    # Check for URL userinfo credentials (e.g. user:pass@host or token@host)
-    if "@" in s:
-        prefix = s.split("@", 1)[0]
+    s_lower = s.lower()
+    s_unq_lower = s_unq.lower()
+    for text_to_check in (s_lower, s_unq_lower):
+        if "canary" in text_to_check and any(
+            kw in text_to_check
+            for kw in (
+                "token",
+                "secret",
+                "cookie",
+                "key",
+                "signature",
+                "session",
+                "credential",
+                "passphrase",
+                "auth",
+                "nonce",
+            )
+        ):
+            return True
+
+    # Check for URL userinfo credentials (e.g. user:pass@host or token@host or api%5Fkey@host)
+    if "@" in s or "@" in s_unq:
+        target = s_unq if "@" in s_unq else s
+        prefix = target.split("@", 1)[0]
         userinfo = prefix.split("://")[-1].split("/")[-1]
         if userinfo:
-            userinfo_norm = userinfo.lower().replace("-", "").replace("_", "")
+            userinfo_norm = _normalize_key_name(userinfo)
             if ":" in userinfo:
                 return True
             for pattern in AUTH_KEY_PATTERNS:
@@ -111,39 +162,72 @@ def _is_auth_string(raw: str) -> bool:
                 if pat_norm in userinfo_norm:
                     return True
 
-    # Check for URL query / form-shaped credentials (e.g. ?api_key=... or token=... or secret=...)
-    query_str = s.split("?", 1)[1] if "?" in s else s
-    query_core = query_str.split("#", 1)[0]
-    if "=" in query_core:
-        pairs = [p for p in query_core.replace(";", "&").split("&") if "=" in p]
-        for pair in pairs:
-            k, _, v = pair.partition("=")
-            k_norm = k.strip().lower().replace("-", "").replace("_", "")
+    # Check for URL query / form-shaped / fragment credentials
+    segments_to_check: list[str] = []
+
+    # 1. Query part
+    if "?" in s:
+        q_part = s.split("?", 1)[1]
+        if "#" in q_part:
+            q_core, frag = q_part.split("#", 1)
+            segments_to_check.append(q_core)
+            segments_to_check.append(frag)
+        else:
+            segments_to_check.append(q_part)
+
+    # 2. Fragment part if not preceded by ? (e.g. positions#api_key=SECRET)
+    if "#" in s and not ("?" in s and "#" in s.split("?", 1)[1]):
+        frag = s.split("#", 1)[1]
+        segments_to_check.append(frag)
+
+    # 3. If no ? or #, check the entire string if it contains =
+    if not segments_to_check and "=" in s:
+        segments_to_check.append(s)
+
+    for segment in segments_to_check:
+        if "=" in segment:
+            pairs = [p for p in segment.replace(";", "&").split("&") if "=" in p]
+            for pair in pairs:
+                k, _, v = pair.partition("=")
+                k_norm = _normalize_key_name(k)
+                for pattern in AUTH_KEY_PATTERNS:
+                    pat_norm = pattern.replace("-", "").replace("_", "")
+                    if pat_norm in k_norm:
+                        return True
+                v_unq = _unquote_plus(v) if v else ""
+                for val_check in (v, v_unq):
+                    if val_check and (
+                        BEARER_PATTERN.search(val_check)
+                        or JWT_PATTERN.search(val_check)
+                        or (
+                            "canary" in val_check.lower()
+                            and any(
+                                kw in val_check.lower()
+                                for kw in (
+                                    "token",
+                                    "secret",
+                                    "cookie",
+                                    "key",
+                                    "signature",
+                                    "session",
+                                    "credential",
+                                    "passphrase",
+                                    "auth",
+                                    "nonce",
+                                )
+                            )
+                        )
+                    ):
+                        return True
+        else:
+            seg_norm = _normalize_key_name(segment)
             for pattern in AUTH_KEY_PATTERNS:
                 pat_norm = pattern.replace("-", "").replace("_", "")
-                if pat_norm in k_norm:
+                if pat_norm in seg_norm:
                     return True
-            if v and (
-                BEARER_PATTERN.search(v)
-                or JWT_PATTERN.search(v)
-                or (
-                    "canary" in v.lower()
-                    and any(
-                        kw in v.lower()
-                        for kw in (
-                            "token",
-                            "secret",
-                            "cookie",
-                            "key",
-                            "signature",
-                            "session",
-                            "credential",
-                            "passphrase",
-                            "auth",
-                            "nonce",
-                        )
-                    )
-                )
+            seg_unq = _unquote_plus(segment)
+            if BEARER_PATTERN.search(seg_unq) or JWT_PATTERN.search(seg_unq) or (
+                "canary" in seg_unq.lower() and any(kw in seg_unq.lower() for kw in ("token", "secret", "key", "auth", "nonce"))
             ):
                 return True
 
@@ -154,7 +238,7 @@ def contains_auth_elements(val: Any) -> bool:
     """Recursively check for auth-shaped field names or secret values in a structure."""
     if isinstance(val, (dict, Mapping)):
         for k, v in val.items():
-            k_norm = str(k).lower().replace("-", "").replace("_", "")
+            k_norm = _normalize_key_name(k)
             for pattern in AUTH_KEY_PATTERNS:
                 pat_norm = pattern.replace("-", "").replace("_", "")
                 if pat_norm in k_norm:

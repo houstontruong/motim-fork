@@ -104,4 +104,13 @@ Fix all four confidentiality findings with targeted regressions:
 3. **MEDIUM — Redactor.redact_data_structure() only traverses dict/list** (`motim/redact.py`). Make structural redaction safely recursive across mapping, tuple, set, and frozenset inputs without breaking deterministic or JSON-safe expectations.
 4. **MEDIUM — Redactor.redact_body_bytes() preserves form auth fields when content type unknown** (`motim/redact.py`). Apply fail-closed treatment that masks sensitive key/value material without corrupting legitimate benign content.
 
+## Round 8 — Confidentiality Remediation
+
+Fix all three confidentiality findings with targeted regressions:
+
+1. **HIGH — Fail-open unknown/generic bodies** (`motim/redact.py`). Support UTF-16 decoding with BOM preservation, sanitize colon-separated and generic key-value plain text bodies (e.g. `password: SECRET123`, `api_key: "abc"`), and enforce fail-closed sanitization for compressed or unparseable binary bodies (`b"[REDACTED: unparseable binary body]"`).
+2. **HIGH — Percent-encoded key bypass** (`motim/reconcile/validator.py`, `motim/redact.py`). URL-decode query/fragment field names before sensitivity checks, rejecting any input with percent-encoded auth keys (such as `api%5Fkey=...`) with `invalid_input`, zero facts, and no canary leaks.
+3. **MEDIUM — Fragment reflection** (`motim/reconcile/validator.py`, `adapters/bybit.py`, `adapters/lighter.py`). Inspect route `#` fragments for auth credentials during ingest validation and defensively strip `#` fragments, query parameters, and userinfo from unsupported route issue messages.
+
+
 

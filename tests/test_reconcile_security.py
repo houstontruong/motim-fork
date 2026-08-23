@@ -411,5 +411,122 @@ class TestGate5SecurityRegression:
         assert cli_out["outcome"] == "invalid_input"
         assert len(cli_out["facts"]) == 0
 
+    @pytest.mark.parametrize(
+        "provider,route_key,sentinel",
+        [
+            # Percent-encoded query keys across Bybit and Lighter
+            ("bybit", "positions?api%5Fkey=CANARY_PCT_APIKEY_11", "CANARY_PCT_APIKEY_11"),
+            ("bybit", "positions?api%2dkey=CANARY_PCT_APIKEY_22", "CANARY_PCT_APIKEY_22"),
+            ("bybit", "positions?%61%70%69%5f%6b%65%79=CANARY_PCT_APIKEY_33", "CANARY_PCT_APIKEY_33"),
+            ("bybit", "positions?token%5fkey=CANARY_PCT_TOK_44", "CANARY_PCT_TOK_44"),
+            ("bybit", "positions?secret%5fkey=CANARY_PCT_SEC_55", "CANARY_PCT_SEC_55"),
+            ("bybit", "positions?n%5fo%5fn%5fc%5fe=CANARY_PCT_NONCE_66", "CANARY_PCT_NONCE_66"),
+            ("bybit", "positions?%70%61%73%73%77%6f%72%64=CANARY_PCT_PASS_77", "CANARY_PCT_PASS_77"),
+            ("lighter", "account_positions?api%5Fkey=CANARY_LIGHTER_PCT_88", "CANARY_LIGHTER_PCT_88"),
+            ("lighter", "trades?api%2dkey=CANARY_LIGHTER_PCT_99", "CANARY_LIGHTER_PCT_99"),
+            ("lighter", "account?%73%65%63%72%65%74=CANARY_LIGHTER_PCT_00", "CANARY_LIGHTER_PCT_00"),
+            # Route fragments across Bybit and Lighter
+            ("bybit", "positions#api_key=CANARY_FRAG_BYBIT_11", "CANARY_FRAG_BYBIT_11"),
+            ("bybit", "positions#token=CANARY_FRAG_BYBIT_22", "CANARY_FRAG_BYBIT_22"),
+            ("bybit", "positions#secret=CANARY_FRAG_BYBIT_33", "CANARY_FRAG_BYBIT_33"),
+            ("bybit", "positions#api%5Fkey=CANARY_FRAG_BYBIT_44", "CANARY_FRAG_BYBIT_44"),
+            ("bybit", "positions#n_o_n_c_e=CANARY_FRAG_BYBIT_55", "CANARY_FRAG_BYBIT_55"),
+            ("lighter", "account_positions#api_key=CANARY_FRAG_LIGHTER_11", "CANARY_FRAG_LIGHTER_11"),
+            ("lighter", "trades#token=CANARY_FRAG_LIGHTER_22", "CANARY_FRAG_LIGHTER_22"),
+            ("lighter", "account#secret=CANARY_FRAG_LIGHTER_33", "CANARY_FRAG_LIGHTER_33"),
+            ("lighter", "account_trades#api%5Fkey=CANARY_FRAG_LIGHTER_44", "CANARY_FRAG_LIGHTER_44"),
+        ],
+    )
+    def test_percent_encoded_and_fragment_route_keys_rejected_with_zero_facts(
+        self, provider: str, route_key: str, sentinel: str, tmp_path: Path
+    ):
+        """Percent-encoded auth query keys and route fragment credentials return invalid_input with zero facts."""
+        body_content = (
+            {"result": {"list": [{"symbol": "BTCUSDT", "side": "Buy", "size": "1.0", "entryPrice": "50000", "markPrice": "50500"}]}}
+            if provider == "bybit"
+            else {"code": 200, "data": {"positions": [{"market_id": "BTC", "side": "LONG", "size": "1.0", "entry_price": "50000", "mark_price": "50500"}]}}
+        )
+        record = {
+            "schema_version": "motim.sanitized_exchange.v1",
+            "exchange_id": f"pct-frag-{provider}-001",
+            "provider": provider,
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": route_key},
+            "response": {
+                "status": 200,
+                "body": body_content,
+            },
+        }
+
+        # 1. Python API validation
+        res_api = reconcile([record], provider, as_of="2026-08-23T14:05:00Z")
+        assert res_api.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_api.facts) == 0
+        assert len(res_api.issues) >= 1
+        res_json = json.dumps(res_api.to_dict())
+        assert sentinel not in res_json
+        for issue in res_api.issues:
+            assert sentinel not in issue.message
+            assert "[REDACTED]" in issue.message or "auth" in issue.message.lower()
+
+        # 2. JSONL string validation
+        raw_jsonl = json.dumps(record) + "\n"
+        res_jsonl = reconcile(raw_jsonl, provider, as_of="2026-08-23T14:05:00Z")
+        assert res_jsonl.outcome == Outcome.INVALID_INPUT.value
+        assert len(res_jsonl.facts) == 0
+        assert sentinel not in json.dumps(res_jsonl.to_dict())
+
+        # 3. CLI execution validation
+        fixture_file = tmp_path / f"pct_frag_{provider}.jsonl"
+        fixture_file.write_text(raw_jsonl, encoding="utf-8")
+        runner = CliRunner()
+        cli_res = runner.invoke(
+            cli,
+            ["reconcile", "--input", str(fixture_file), "--provider", provider, "--as-of", "2026-08-23T14:05:00Z"],
+        )
+        assert cli_res.exit_code == 4
+        assert sentinel not in cli_res.output
+        cli_out = json.loads(cli_res.output)
+        assert cli_out["outcome"] == "invalid_input"
+        assert len(cli_out["facts"]) == 0
+
+    def test_adapter_unsupported_route_sanitization_defense_in_depth(self):
+        """Adapters defensively strip query strings, fragments, and userinfo from unsupported route messages."""
+        from motim.reconcile.adapters.bybit import BybitAdapter
+        from motim.reconcile.adapters.lighter import LighterAdapter
+
+        bybit = BybitAdapter()
+        lighter = LighterAdapter()
+
+        canary_frag_1 = "CANARY_ADAPTER_FRAG_SECRET_1122"
+        canary_frag_2 = "CANARY_ADAPTER_FRAG_SECRET_3344"
+
+        # 1. Bybit adapter unsupported route with fragment
+        bybit_exchange = {
+            "exchange_id": "bybit-unsupp-001",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": f"unsupported_route#api_key={canary_frag_1}"},
+            "response": {"status": 200, "body": {}},
+        }
+        res_bybit = bybit.reconcile_exchange(bybit_exchange)
+        assert not res_bybit.is_supported
+        assert len(res_bybit.issues) == 1
+        assert canary_frag_1 not in res_bybit.issues[0].message
+        assert res_bybit.issues[0].message == "Bybit route 'unsupported_route' is not supported"
+
+        # 2. Lighter adapter unsupported route with fragment
+        lighter_exchange = {
+            "exchange_id": "lighter-unsupp-001",
+            "captured_at": "2026-08-23T14:00:00Z",
+            "request": {"method": "GET", "route_key": f"unsupported_route#token={canary_frag_2}"},
+            "response": {"status": 200, "body": {}},
+        }
+        res_lighter = lighter.reconcile_exchange(lighter_exchange)
+        assert not res_lighter.is_supported
+        assert len(res_lighter.issues) == 1
+        assert canary_frag_2 not in res_lighter.issues[0].message
+        assert res_lighter.issues[0].message == "Lighter route 'unsupported_route' is not supported"
+
+
 
 

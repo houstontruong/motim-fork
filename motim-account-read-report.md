@@ -91,6 +91,15 @@ All four confidentiality findings from the Codex audit have been remediated with
 | **Redactor.redact_data_structure() only traverses dict/list** | **MEDIUM** | Extended `redact_data_structure()` to recursively traverse `tuple`, `set`, `frozenset`, custom `Mapping`, and `Sequence` containers while preserving container types and model expectations. | `tests/test_redaction.py`<br>- `test_redactor_recursive_containers_data_structure` testing tuples, sets, frozensets, and deeply nested container trees with canary secrets. |
 | **Redactor.redact_body_bytes() preserves form auth fields when content type unknown** | **MEDIUM** | Implemented `_redact_form_text(strict_urlencode=False)` to fail-closed detect and mask sensitive key/value pairs across single/multi-parameter and multi-line text bodies when content type is unknown or generic, without corrupting benign text/code. | `tests/test_redaction.py`<br>- `test_redactor_body_bytes_unknown_content_type_fail_closed` verifying single form fields, multi-line forms, and benign text preservation. |
 
+### Round 8 Remediation (Confidentiality Remediation)
+All three confidentiality findings from the Codex audit of commit `52c882e` have been remediated with focused regression tests:
+
+| Finding | Severity | Description & Remediation | Regression Tests |
+|---|---|---|---|
+| **Fail-open unknown/generic bodies** | **HIGH** | Added UTF-16 decoding with BOM preservation in `redact_body_bytes`; implemented line-level and inline key-value sanitization (`_redact_plain_text` and `_redact_single_line_text`) for colon `:`, equals `=`, and walrus `:=` pairs; enforced fail-closed handling for compressed (`gzip`, `deflate`, `br`, `zstd`, `zip`) or unparseable binary bodies (`b"[REDACTED: unparseable binary body]"`). | `tests/test_redaction.py`<br>- `test_redactor_body_bytes_utf16_and_encodings`<br>- `test_redactor_body_bytes_generic_colon_text_redaction`<br>- `test_redactor_body_bytes_unparseable_binary_and_compressed_fail_closed`<br>- `test_persistence_path_utf16_colon_and_binary_redaction` (SQLite persistence verification). |
+| **Percent-encoded key bypass** | **HIGH** | Added pure-Python URL decoding (`_unquote_plus` without `urllib` import) in `validator.py` and `Redactor.is_sensitive_name()` before sensitivity checks; percent-encoded query/fragment keys like `api%5Fkey=...` or `%61%70%69%5f%6b%65%79=...` are rejected at ingest with `ValidationError("Rejected input containing auth-shaped field [REDACTED]", code="auth_field_detected")`, returning structured `invalid_input`, zero facts, and exit code 4. | `tests/test_reconcile_security.py`<br>- `test_percent_encoded_and_fragment_route_keys_rejected_with_zero_facts` across Bybit and Lighter via Python API, JSONL strings, and CLI subprocess execution. |
+| **Route fragment reflection** | **MEDIUM** | Updated `_is_auth_string` to inspect `#` fragments for auth credentials at ingest; defensively updated `BybitAdapter` and `LighterAdapter` to strip `#`, `?`, `;`, and `@` from unsupported route issue messages. | `tests/test_reconcile_security.py`<br>- `test_percent_encoded_and_fragment_route_keys_rejected_with_zero_facts`<br>- `test_adapter_unsupported_route_sanitization_defense_in_depth`. |
+
 ---
 
 ## 3. Verification Gate Results (Gates 1 – 6)
@@ -101,8 +110,8 @@ All four confidentiality findings from the Codex audit have been remediated with
 | **Gate 2: Adapter Tests** | Bybit and Lighter adapters across all 6 fact types (`position`, `fill`, `funding`, `balance`, `equity`, `pnl`), malformed records, unknown route schemas, mixed recognized/unsupported batches. | `tests/test_reconcile_adapters.py`<br>- 5 test cases for Bybit and Lighter adapters. | **PASSED** (5/5) ✅ |
 | **Gate 3: CLI Smoke** | `motim reconcile`, `motim facts`, `motim issues` verifying stdout JSON format and exit codes `0`, `2`, `3`, `4`, including negative max age and non-GET method rejection. | `tests/test_reconcile_cli.py`<br>- 14 test cases covering CLI smoke and edge cases. | **PASSED** (14/14) ✅ |
 | **Gate 4: No-Network & No-Replay** | Static AST audit ensuring no network modules are imported in reconciliation code; subprocess execution under an active socket/DNS sabotaged guard; no request builders or replay mechanisms. | `tests/test_reconcile_no_network.py`<br>- 3 test cases auditing AST and running under active network sabotage guard. | **PASSED** (3/3) ✅ |
-| **Gate 5: Security Regression** | Ingestion of canary secret tokens across headers, cookies, query, body, duplicate-key bypass vectors, nested container structures (tuples, sets, frozensets), nested auth material key families (`signature`, `session_id`, `credentials`, `passphrase`), nested `nonce` variants, split-separator variants (`n_o_n_c_e`, `n-o-n-c-e`, `x-n-o-n-c-e`), credential-bearing route keys (`?api_key=...`, `?token=...`, userinfo `user:pass@...`); assert zero leaks in output JSON, stderr, or reports. | `tests/test_reconcile_security.py`<br>- 41 test cases asserting zero secret sentinel leaks. | **PASSED** (41/41) ✅ |
-| **Gate 6: Full Suite** | Full test suite regression green. | `pytest` running all 240 test cases across the entire repository. | **PASSED** (240/240) ✅ |
+| **Gate 5: Security Regression** | Ingestion of canary secret tokens across headers, cookies, query, body, duplicate-key bypass vectors, nested container structures (tuples, sets, frozensets), nested auth material key families (`signature`, `session_id`, `credentials`, `passphrase`), nested `nonce` variants, split-separator variants (`n_o_n_c_e`, `n-o-n-c-e`, `x-n-o-n-c-e`), credential-bearing route keys (`?api_key=...`, `?token=...`, userinfo `user:pass@...`), percent-encoded query keys (`api%5Fkey=...`), route fragments (`#api_key=...`), UTF-16 payloads, colon-separated generic text, and compressed/binary payloads; assert zero leaks in output JSON, stderr, or reports. | `tests/test_reconcile_security.py` & `tests/test_redaction.py`<br>- 76 security and redaction test cases asserting zero secret sentinel leaks. | **PASSED** (76/76) ✅ |
+| **Gate 6: Full Suite** | Full test suite regression green. | `pytest` running all 264 test cases across the entire repository. | **PASSED** (264/264) ✅ |
 
 ---
 
@@ -116,27 +125,28 @@ configfile: pyproject.toml
 testpaths: tests
 plugins: anyio-4.13.0, asyncio-1.3.0, timeout-2.4.0
 asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
-collected 240 items
+collected 264 items
 
-tests\test_auth.py .....................                                 [  8%]
-tests\test_cli.py .................                                      [ 15%]
-tests\test_client.py ..                                                  [ 16%]
-tests\test_config.py ............                                        [ 21%]
-tests\test_diff.py .                                                     [ 22%]
-tests\test_egress.py ........                                            [ 25%]
-tests\test_exchange_db.py .....                                          [ 27%]
-tests\test_exchange_writer.py .                                          [ 27%]
-tests\test_gates.py ..................                                   [ 35%]
-tests\test_linkfinder_integration.py ..                                  [ 36%]
-tests\test_reconcile_adapters.py .....                                   [ 38%]
-tests\test_reconcile_cli.py ..............                               [ 44%]
-tests\test_reconcile_contract.py .....................................   [ 59%]
-tests\test_reconcile_no_network.py ...                                   [ 60%]
-tests\test_reconcile_security.py ....................................... [ 77%]
-..                                                                       [ 77%]
-tests\test_redaction.py ...........                                      [ 82%]
-tests\test_service.py ........................                           [ 92%]
+tests\test_auth.py .....................                                 [  7%]
+tests\test_cli.py .................                                      [ 14%]
+tests\test_client.py ..                                                  [ 15%]
+tests\test_config.py ............                                        [ 19%]
+tests\test_diff.py .                                                     [ 20%]
+tests\test_egress.py ........                                            [ 23%]
+tests\test_exchange_db.py .....                                          [ 25%]
+tests\test_exchange_writer.py .                                          [ 25%]
+tests\test_gates.py ..................                                   [ 32%]
+tests\test_linkfinder_integration.py ..                                  [ 32%]
+tests\test_reconcile_adapters.py .....                                   [ 34%]
+tests\test_reconcile_cli.py ..............                               [ 40%]
+tests\test_reconcile_contract.py .....................................   [ 54%]
+tests\test_reconcile_no_network.py ...                                   [ 55%]
+tests\test_reconcile_security.py ....................................... [ 70%]
+......................                                                   [ 78%]
+tests\test_redaction.py ...............                                  [ 84%]
+tests\test_service.py ........................                           [ 93%]
 tests\test_store.py ..................                                   [100%]
 
-============================= 240 passed in 5.93s =============================
+============================= 264 passed in 6.45s =============================
 ```
+

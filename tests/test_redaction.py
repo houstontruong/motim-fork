@@ -434,3 +434,222 @@ def test_redactor_body_bytes_unknown_content_type_fail_closed():
     r6 = redactor.redact_body_bytes(b6, None)
     assert r6 == b"status=ok&count=5&name=Alice"
 
+
+def test_redactor_body_bytes_utf16_and_encodings():
+    """Verify Redactor.redact_body_bytes() properly redacts UTF-16 encoded payloads and preserves benign content."""
+    redactor = Redactor(profile="strict")
+
+    # 1. UTF-16-LE with BOM containing password
+    canary_utf16_1 = "CANARY_UTF16_PW_LE_1122"
+    raw_utf16_le = f"password: {canary_utf16_1}\nuser: alice".encode("utf-16-le")
+    # Add BOM
+    bom_le = b"\xff\xfe" + raw_utf16_le
+    red_le = redactor.redact_body_bytes(bom_le, "text/plain; charset=utf-16")
+    assert red_le is not None
+    assert canary_utf16_1.encode("utf-16-le") not in red_le
+    assert canary_utf16_1.encode("utf-8") not in red_le
+    decoded_le = red_le.decode("utf-16")
+    assert "[REDACTED]" in decoded_le
+    assert "user: alice" in decoded_le
+
+    # 2. UTF-16-BE with BOM containing api_key
+    canary_utf16_2 = "CANARY_UTF16_KEY_BE_3344"
+    raw_utf16_be = f"api_key: {canary_utf16_2}\nstatus: ok".encode("utf-16-be")
+    bom_be = b"\xfe\xff" + raw_utf16_be
+    red_be = redactor.redact_body_bytes(bom_be, None)
+    assert red_be is not None
+    assert canary_utf16_2.encode("utf-16-be") not in red_be
+    decoded_be = red_be.decode("utf-16")
+    assert "[REDACTED]" in decoded_be
+    assert "status: ok" in decoded_be
+
+    # 3. Benign UTF-16 content preserved
+    benign_utf16 = "item: widget\ncount: 10".encode("utf-16")
+    red_benign = redactor.redact_body_bytes(benign_utf16, "text/plain")
+    assert red_benign is not None
+    assert "item: widget" in red_benign.decode("utf-16")
+    assert "count: 10" in red_benign.decode("utf-16")
+
+
+def test_redactor_body_bytes_generic_colon_text_redaction():
+    """Verify Redactor.redact_body_bytes() sanitizes colon, equals, and walrus separated generic text."""
+    redactor = Redactor(profile="strict")
+
+    # 1. Plain colon text
+    canary_colon_1 = "CANARY_COLON_PW_5566"
+    b1 = f"password: {canary_colon_1}".encode("utf-8")
+    r1 = redactor.redact_body_bytes(b1, "text/plain")
+    assert r1 is not None
+    assert canary_colon_1.encode("utf-8") not in r1
+    assert b"password: [REDACTED]" in r1
+
+    # 2. Quoted colon text
+    canary_colon_2 = "CANARY_COLON_KEY_7788"
+    b2 = f'api_key: "{canary_colon_2}"'.encode("utf-8")
+    r2 = redactor.redact_body_bytes(b2, None)
+    assert r2 is not None
+    assert canary_colon_2.encode("utf-8") not in r2
+    assert b'api_key: "[REDACTED]"' in r2
+
+    # 3. Equals text with spaces
+    canary_colon_3 = "CANARY_COLON_TOK_9900"
+    b3 = f"token = '{canary_colon_3}'".encode("utf-8")
+    r3 = redactor.redact_body_bytes(b3, None)
+    assert r3 is not None
+    assert canary_colon_3.encode("utf-8") not in r3
+    assert b"token = '[REDACTED]'" in r3
+
+    # 4. Walrus := operator
+    canary_colon_4 = "CANARY_COLON_SEC_1133"
+    b4 = f"secret := {canary_colon_4}".encode("utf-8")
+    r4 = redactor.redact_body_bytes(b4, None)
+    assert r4 is not None
+    assert canary_colon_4.encode("utf-8") not in r4
+    assert b"secret := [REDACTED]" in r4
+
+    # 5. Split-nonce in colon format
+    canary_colon_5 = "CANARY_COLON_NONCE_5577"
+    b5 = f"n_o_n_c_e: {canary_colon_5}".encode("utf-8")
+    r5 = redactor.redact_body_bytes(b5, None)
+    assert r5 is not None
+    assert canary_colon_5.encode("utf-8") not in r5
+    assert b"n_o_n_c_e: [REDACTED]" in r5
+
+    # 6. Percent-encoded key in colon format
+    canary_colon_6 = "CANARY_COLON_PCT_9911"
+    b6 = f"api%5Fkey: {canary_colon_6}".encode("utf-8")
+    r6 = redactor.redact_body_bytes(b6, None)
+    assert r6 is not None
+    assert canary_colon_6.encode("utf-8") not in r6
+    assert b"api%5Fkey: [REDACTED]" in r6
+
+    # 7. Multiline YAML-like payload preserving benign fields
+    canary_yaml_pw = "CANARY_YAML_SECRET_PASS_2244"
+    canary_yaml_key = "CANARY_YAML_SECRET_KEY_6688"
+    yaml_text = (
+        f"user: alice\n"
+        f"password: {canary_yaml_pw}\n"
+        f"role: admin\n"
+        f"api_key: '{canary_yaml_key}'\n"
+        f"status: 200\n"
+    )
+    r7 = redactor.redact_body_bytes(yaml_text.encode("utf-8"), "application/x-yaml")
+    assert r7 is not None
+    assert canary_yaml_pw.encode("utf-8") not in r7
+    assert canary_yaml_key.encode("utf-8") not in r7
+    decoded_yaml = r7.decode("utf-8")
+    assert "user: alice" in decoded_yaml
+    assert "password: [REDACTED]" in decoded_yaml
+    assert "role: admin" in decoded_yaml
+    assert "api_key: '[REDACTED]'" in decoded_yaml
+    assert "status: 200" in decoded_yaml
+
+
+def test_redactor_body_bytes_unparseable_binary_and_compressed_fail_closed():
+    """Verify Redactor.redact_body_bytes() fails closed on compressed and unparseable binary data."""
+    import gzip
+    redactor = Redactor(profile="strict")
+
+    # 1. Gzip compressed payload with canary
+    canary_gzip = "CANARY_GZIP_SECRET_998811"
+    gzip_bytes = gzip.compress(f"password={canary_gzip}".encode("utf-8"))
+    r_gzip = redactor.redact_body_bytes(gzip_bytes, "application/gzip")
+    assert r_gzip == b"[REDACTED: unparseable binary body]"
+    assert canary_gzip.encode("utf-8") not in r_gzip
+
+    # 2. Deflate / compressed content type
+    canary_deflate = "CANARY_DEFLATE_SECRET_223344"
+    r_deflate = redactor.redact_body_bytes(b"\x78\x9c\x01" + canary_deflate.encode("utf-8"), "application/x-deflate")
+    assert r_deflate == b"[REDACTED: unparseable binary body]"
+    assert canary_deflate.encode("utf-8") not in r_deflate
+
+    # 3. Arbitrary non-UTF-8 / non-UTF-16 binary data containing canary
+    canary_bin = "CANARY_RAW_BINARY_SECRET_556677"
+    raw_bin = b"\x00\x80\xff\xfe\x00\x81\x92" + canary_bin.encode("utf-8") + b"\xff\xff\x00\x00"
+    r_bin = redactor.redact_body_bytes(raw_bin, None)
+    assert r_bin == b"[REDACTED: unparseable binary body]"
+    assert canary_bin.encode("utf-8") not in r_bin
+
+
+def test_persistence_path_utf16_colon_and_binary_redaction(tmp_path: Path):
+    """Verify ExchangeDB persistence sanitizes UTF-16, colon text, and binary payloads before disk storage."""
+    import gzip
+    db_path = tmp_path / "motim_persist.sqlite3"
+    db = ExchangeDB(db_path)
+
+    canary_persist_utf16 = "CANARY_PERSIST_UTF16_0011"
+    canary_persist_colon = "CANARY_PERSIST_COLON_2233"
+    canary_persist_bin = "CANARY_PERSIST_BINARY_4455"
+
+    try:
+        # 1. Insert exchange with UTF-16 body
+        utf16_body = f"password: {canary_persist_utf16}".encode("utf-16")
+        db.put_exchange(
+            scheme="https",
+            host="api.example.com",
+            port=443,
+            method="POST",
+            path="/v1/auth",
+            query=None,
+            url="https://api.example.com/v1/auth",
+            status=200,
+            req_body=utf16_body,
+            req_content_type="text/plain; charset=utf-16",
+        )
+
+        # 2. Insert exchange with colon generic text body
+        colon_body = f"user: alice\napi_key: {canary_persist_colon}".encode("utf-8")
+        db.put_exchange(
+            scheme="https",
+            host="api.example.com",
+            port=443,
+            method="POST",
+            path="/v1/key",
+            query=None,
+            url="https://api.example.com/v1/key",
+            status=200,
+            req_body=colon_body,
+            req_content_type="text/plain",
+        )
+
+        # 3. Insert exchange with gzip compressed body
+        bin_body = gzip.compress(f"secret={canary_persist_bin}".encode("utf-8"))
+        db.put_exchange(
+            scheme="https",
+            host="api.example.com",
+            port=443,
+            method="POST",
+            path="/v1/upload",
+            query=None,
+            url="https://api.example.com/v1/upload",
+            status=200,
+            req_body=bin_body,
+            req_content_type="application/gzip",
+        )
+
+        # Verify all exchanges in database
+        for ex_id in (1, 2, 3):
+            ex = db.get_exchange(ex_id)
+            assert ex is not None
+            req_body = ex["bodies"]["request"]
+            assert req_body is not None
+
+            # Assert zero canary leaks in persisted raw bytes
+            for canary in (canary_persist_utf16, canary_persist_colon, canary_persist_bin):
+                assert canary.encode("utf-8") not in req_body
+                assert canary.encode("utf-16") not in req_body
+                assert canary.encode("utf-16-le") not in req_body
+                assert canary.encode("utf-16-be") not in req_body
+
+        # Assert no canary strings in entire SQLite file
+        db_bytes = db_path.read_bytes()
+        for canary in (canary_persist_utf16, canary_persist_colon, canary_persist_bin):
+            assert canary.encode("utf-8") not in db_bytes
+            assert canary.encode("utf-16") not in db_bytes
+            assert canary.encode("utf-16-le") not in db_bytes
+            assert canary.encode("utf-16-be") not in db_bytes
+
+    finally:
+        db.close()
+
+

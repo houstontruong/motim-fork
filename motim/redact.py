@@ -11,7 +11,7 @@ import json
 import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence, Set
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, unquote, unquote_plus, urlencode, urlparse, urlunparse
 
 from .normalize import format_cookie_header, parse_cookie_header
 
@@ -127,9 +127,18 @@ _CANARY_TOKEN_PATTERN = re.compile(
 def normalize_sensitive_name(name: Any) -> str:
     """Normalize a header, query parameter, or field name for sensitive pattern matching.
 
-    Converts to lowercase and strips hyphens and underscores.
+    Unquotes percent-encoded characters, converts to lowercase, and strips hyphens and underscores.
     """
-    return str(name).lower().replace("-", "").replace("_", "")
+    s = str(name)
+    try:
+        for _ in range(3):
+            unq = unquote_plus(s)
+            if unq == s:
+                break
+            s = unq
+    except Exception:
+        pass
+    return s.lower().replace("-", "").replace("_", "")
 
 
 class Redactor:
@@ -383,6 +392,69 @@ class Redactor:
 
         return data
 
+    def _redact_single_line_text(self, text: str) -> str:
+        line = text
+        nl = ""
+        if line.endswith("\r\n"):
+            line = line[:-2]
+            nl = "\r\n"
+        elif line.endswith("\n"):
+            line = line[:-1]
+            nl = "\n"
+
+        # 1. First check if line is a single key-value pair separated by : or = or :=
+        kv_match = re.match(
+            r'^(\s*[\'"]?)(?P<key>[a-zA-Z0-9_\-\.%]+)([\'"]?\s*(?::=|:|=)\s*)(?P<quote>[\'"]?)(?P<val>.*?)(?P=quote)(\s*[,;]?\s*)$',
+            line,
+        )
+        if kv_match:
+            k = kv_match.group("key")
+            if self.is_sensitive_name(k):
+                prefix = line[: kv_match.start("val")]
+                suffix = line[kv_match.end("val") :]
+                return f"{prefix}{self.placeholder}{suffix}{nl}"
+
+        # 2. Check if line contains inline key-value pairs
+        def _replace_kv_match(m: re.Match) -> str:
+            k = m.group("key")
+            if self.is_sensitive_name(k):
+                quote = m.group("quote") or ""
+                sep = m.group("sep")
+                return f"{k}{sep}{quote}{self.placeholder}{quote}"
+            return m.group(0)
+
+        inline_kv_pattern = re.compile(
+            r'(?P<key>\b[a-zA-Z0-9_\-\.%]+)(?P<sep>\s*(?::=|:|=)\s*)(?P<quote>[\'"]?)(?P<val>[^\s,"\'&;]+)(?P=quote)'
+        )
+        redacted_line = inline_kv_pattern.sub(_replace_kv_match, line)
+
+        # 3. Apply standard token and URL sanitization
+        redacted_line = _JWT_PATTERN.sub(self.placeholder, redacted_line)
+        redacted_line = _BEARER_PATTERN.sub(f"Bearer {self.placeholder}", redacted_line)
+        redacted_line = _CANARY_TOKEN_PATTERN.sub(self.placeholder, redacted_line)
+        redacted_line = _PRIVATE_KEY_PATTERN.sub(
+            f"-----BEGIN PRIVATE KEY-----\n{self.placeholder}\n-----END PRIVATE KEY-----", redacted_line
+        )
+        if ("?" in redacted_line or "@" in redacted_line or "://" in redacted_line) and any(
+            sub in normalize_sensitive_name(redacted_line) for sub in self._normalized_sensitive_key_substrings
+        ):
+            try:
+                redacted_line = self.redact_url(redacted_line) or redacted_line
+            except Exception:
+                pass
+
+        return redacted_line + nl
+
+    def _redact_plain_text(self, text: str) -> str:
+        """Redact sensitive key-value pairs (colon/equals delimited), tokens, and URLs in generic text."""
+        if not text:
+            return text
+
+        if "\n" in text:
+            lines = text.splitlines(keepends=True)
+            return "".join(self._redact_single_line_text(line) for line in lines)
+        return self._redact_single_line_text(text)
+
     def _redact_form_text(self, text: str, *, strict_urlencode: bool = False) -> str:
         """Redact sensitive form or key-value fields in text.
 
@@ -406,13 +478,13 @@ class Redactor:
                     red_line = self._redact_form_text(line_core, strict_urlencode=strict_urlencode)
                     redacted_lines.append(red_line + nl)
                 else:
-                    redacted_lines.append(self.redact_data_structure(line))
+                    redacted_lines.append(self._redact_plain_text(line))
             return "".join(redacted_lines)
 
         try:
             pairs = parse_qsl(text, keep_blank_values=True)
             if not pairs:
-                return self.redact_data_structure(text)
+                return self._redact_plain_text(text)
 
             has_sensitive = any(self.is_sensitive_name(str(k)) for k, _ in pairs)
 
@@ -420,7 +492,7 @@ class Redactor:
                 return self.redact_query_string(text) or text
 
             if not has_sensitive:
-                return self.redact_data_structure(text)
+                return self._redact_plain_text(text)
 
             redacted_pairs = []
             for k, v in pairs:
@@ -434,7 +506,7 @@ class Redactor:
                     redacted_pairs.append((k_str, v_clean))
             return "&".join(f"{k}={v}" for k, v in redacted_pairs)
         except Exception:
-            return self.redact_data_structure(text)
+            return self._redact_plain_text(text)
 
     def redact_body_bytes(
         self, body_bytes: bytes | None, content_type: str | None = None
@@ -445,7 +517,33 @@ class Redactor:
 
         ct = (content_type or "").lower()
 
-        # 1. Try JSON parsing
+        # 1. Fail closed on explicitly compressed content types
+        if any(comp in ct for comp in ("gzip", "deflate", "br", "brotli", "zstd", "compress", "application/x-gzip", "application/zip", "application/x-deflate")):
+            return b"[REDACTED: unparseable binary body]"
+
+        # 2. Multipart form data: fail closed
+        if "multipart/form-data" in ct:
+            return b"--multipart-omitted-for-redaction--"
+
+        # 3. UTF-16 content (explicit charset or BOM header)
+        if "utf-16" in ct or "utf16" in ct or body_bytes.startswith((b"\xff\xfe", b"\xfe\xff")):
+            try:
+                if body_bytes.startswith(b"\xff\xfe"):
+                    decoded = body_bytes[2:].decode("utf-16-le")
+                    redacted_text = self._redact_plain_text(decoded)
+                    return b"\xff\xfe" + redacted_text.encode("utf-16-le")
+                elif body_bytes.startswith(b"\xfe\xff"):
+                    decoded = body_bytes[2:].decode("utf-16-be")
+                    redacted_text = self._redact_plain_text(decoded)
+                    return b"\xfe\xff" + redacted_text.encode("utf-16-be")
+                else:
+                    decoded = body_bytes.decode("utf-16")
+                    redacted_text = self._redact_plain_text(decoded)
+                    return redacted_text.encode("utf-16")
+            except Exception:
+                return b"[REDACTED: unparseable binary body]"
+
+        # 4. Try JSON parsing
         if "json" in ct or body_bytes.strip().startswith((b"{", b"[")):
             try:
                 decoded = body_bytes.decode("utf-8")
@@ -456,21 +554,7 @@ class Redactor:
                 if "json" in ct:
                     return b'{"_redacted": "[REDACTED: unparseable json body]"}'
 
-        # 2. Multipart form data: fail closed
-        if "multipart/form-data" in ct:
-            return b"--multipart-omitted-for-redaction--"
-
-        # 3. Known code / markup text content types: sanitize with regex / structural rules
-        if any(t in ct for t in ("javascript", "xml", "html", "yaml", "css")):
-            try:
-                text = body_bytes.decode("utf-8", errors="replace")
-                redacted_text = self.redact_data_structure(text)
-                if isinstance(redacted_text, str):
-                    return redacted_text.encode("utf-8")
-            except Exception:
-                return b"[REDACTED: unparseable text body]"
-
-        # 4. Form-urlencoded (explicit content-type)
+        # 5. Form-urlencoded (explicit content-type)
         if "x-www-form-urlencoded" in ct:
             try:
                 decoded = body_bytes.decode("utf-8")
@@ -480,26 +564,26 @@ class Redactor:
             except Exception:
                 return b"_redacted=[REDACTED: unparseable form]"
 
-        # 5. Form-shaped payloads when content-type is unknown / generic text
-        if b"=" in body_bytes and not body_bytes.strip().startswith(b"<"):
+        # 6. Known code / markup text content types: sanitize with regex / structural rules
+        if any(t in ct for t in ("javascript", "xml", "html", "yaml", "css")):
             try:
-                decoded = body_bytes.decode("utf-8")
-                redacted_form = self._redact_form_text(decoded, strict_urlencode=False)
-                if redacted_form is not None:
-                    return redacted_form.encode("utf-8")
-            except UnicodeDecodeError:
-                pass
+                text = body_bytes.decode("utf-8", errors="replace")
+                redacted_text = self._redact_plain_text(text)
+                if isinstance(redacted_text, str):
+                    return redacted_text.encode("utf-8")
+            except Exception:
+                return b"[REDACTED: unparseable text body]"
 
-        # 6. General fallback: if UTF-8 decodable, sanitize text patterns; else if unparseable binary, keep length or mask
+        # 7. General fallback for UTF-8 decodable plain text
         try:
             text = body_bytes.decode("utf-8")
-            redacted_text = self.redact_data_structure(text)
-            if isinstance(redacted_text, str):
-                return redacted_text.encode("utf-8")
+            redacted_text = self._redact_plain_text(text)
+            return redacted_text.encode("utf-8")
         except UnicodeDecodeError:
             pass
 
-        return body_bytes
+        # 8. Unparseable binary or unsupported encoding: fail closed
+        return b"[REDACTED: unparseable binary body]"
 
     def redact_flow_payload(self, p: dict[str, Any]) -> dict[str, Any]:
         """Redact a full normalized flow payload synchronously before queuing or DB insert."""
