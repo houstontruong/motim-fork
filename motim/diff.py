@@ -9,14 +9,18 @@ from __future__ import annotations
 
 from typing import Mapping, Sequence
 
+from .redact import get_redactor
+
 
 def diff_exchanges(a: Mapping, b: Mapping) -> dict:
     """Produce a structured diff between two captured exchanges."""
+    redactor = get_redactor()
 
     def _multi(hlist: Sequence[Mapping[str, str]]) -> dict[str, list[str]]:
         out: dict[str, list[str]] = {}
         for h in hlist:
-            out.setdefault(h["name"].lower(), []).append(h["value"])
+            val = redactor.redact_header_value(h["name"], h["value"])
+            out.setdefault(h["name"].lower(), []).append(val)
         return out
 
     a_req = _multi((a.get("headers", {}).get("request") or []))
@@ -35,13 +39,13 @@ def diff_exchanges(a: Mapping, b: Mapping) -> dict:
         "a": {
             "id": a.get("id"),
             "method": a.get("method"),
-            "url": a.get("url"),
+            "url": redactor.redact_url(a.get("url")) if a.get("url") else None,
             "status": a.get("status"),
         },
         "b": {
             "id": b.get("id"),
             "method": b.get("method"),
-            "url": b.get("url"),
+            "url": redactor.redact_url(b.get("url")) if b.get("url") else None,
             "status": b.get("status"),
         },
         "request_headers": _diff_headers(a_req, b_req),

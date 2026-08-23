@@ -89,6 +89,62 @@ class TestGate1ReplayRemovedAtSource:
                         f"Found forbidden function to_headers in {py_file}"
                     )
 
+    def test_export_curl_redaction_prevents_credential_replay(self, tmp_path: Path):
+        """Gate G1 / Audit Finding C4/H2: CLI export must never emit live replayable credentials.
+
+        Even if raw credentials exist in SQLite (e.g. from legacy DBs or manual inserts),
+        export must sanitize headers, query parameters, and body payloads with [REDACTED].
+        """
+        import sqlite3
+        from click.testing import CliRunner
+        from motim.cli.main import cli
+        from motim.exchange_db import ExchangeDB
+
+        db_path = tmp_path / "legacy_raw.sqlite3"
+        db = ExchangeDB(db_path)
+        db.close()
+
+        # Seed raw secrets directly via SQL
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO exchanges (id, ts, scheme, host, port, method, path, query, url, status)
+            VALUES (1, '2026-08-23T10:00:00Z', 'https', 'api.example.com', 443, 'POST',
+                    '/v1/auth/login', 'token=RAW_QUERY_SECRET_TOKEN',
+                    'https://api.example.com/v1/auth/login?token=RAW_QUERY_SECRET_TOKEN', 200)
+            """
+        )
+        cur.execute("INSERT INTO headers (exchange_id, side, idx, name, value) VALUES (1, 'request', 0, 'Authorization', 'Bearer RAW_BEARER_SECRET_TOKEN')")
+        cur.execute("INSERT INTO headers (exchange_id, side, idx, name, value) VALUES (1, 'request', 1, 'Cookie', 'session=RAW_COOKIE_SECRET_TOKEN; theme=dark')")
+        cur.execute("INSERT INTO headers (exchange_id, side, idx, name, value) VALUES (1, 'request', 2, 'X-API-Key', 'RAW_API_KEY_SECRET_TOKEN')")
+        cur.execute("INSERT INTO headers (exchange_id, side, idx, name, value) VALUES (1, 'request', 3, 'Content-Type', 'application/json')")
+        cur.execute("INSERT INTO headers (exchange_id, side, idx, name, value) VALUES (1, 'request', 4, 'Host', 'api.example.com')")
+        cur.execute(
+            "INSERT INTO bodies (exchange_id, side, raw) VALUES (1, 'request', ?)",
+            (b'{"password": "RAW_PASSWORD_SECRET_TOKEN", "client_secret": "RAW_CLIENT_SECRET", "user": "admin"}',),
+        )
+        conn.commit()
+        conn.close()
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["export", "1", "--db", str(db_path)])
+        assert result.exit_code == 0
+        out = result.output
+
+        # Raw secrets must NOT be present
+        assert "RAW_BEARER_SECRET_TOKEN" not in out
+        assert "RAW_COOKIE_SECRET_TOKEN" not in out
+        assert "RAW_API_KEY_SECRET_TOKEN" not in out
+        assert "RAW_PASSWORD_SECRET_TOKEN" not in out
+        assert "RAW_CLIENT_SECRET" not in out
+        assert "RAW_QUERY_SECRET_TOKEN" not in out
+
+        # Redaction placeholders MUST be present
+        assert "[REDACTED]" in out
+        assert "Bearer [REDACTED]" in out
+        assert "session=[REDACTED]" in out
+
 
 class TestGate2RedactionBeforePersistence:
     """Gate G2 — Synthetic test traffic with known fake API keys/tokens.

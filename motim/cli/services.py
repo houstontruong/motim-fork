@@ -6,6 +6,7 @@ import click
 
 from ..config import get_config
 from ..exchange_db import ExchangeDB
+from ..redact import get_redactor
 
 
 @click.group(invoke_without_command=True)
@@ -166,6 +167,12 @@ def samples(name: str, endpoint: str | None, limit: int, as_json: bool):
             path_contains=endpoint,
             limit=max(1, int(limit)),
         )
+        redactor = get_redactor()
+        for r in results:
+            if "url" in r and r["url"]:
+                r["url"] = redactor.redact_url(str(r["url"]))
+            if "query" in r and r["query"]:
+                r["query"] = redactor.redact_query_string(str(r["query"]))
 
         if as_json:
             click.echo(_json.dumps(results, ensure_ascii=False, default=str))

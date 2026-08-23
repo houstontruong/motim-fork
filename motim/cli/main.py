@@ -7,6 +7,7 @@ import click
 from motim.config import get_config
 from motim.diff import diff_exchanges
 from motim.exchange_db import ExchangeDB
+from motim.redact import get_redactor
 
 from .config_cmd import config
 from .proxy import proxy
@@ -140,10 +141,25 @@ def show(
 
     with _open_db(db_path) as db:
         ex = db.get_exchange(exchange_id)
-        req_headers = ex["headers"]["request"]
-        resp_headers = ex["headers"]["response"]
-        req_body = ex["bodies"]["request"]
-        resp_body = ex["bodies"]["response"]
+        redactor = get_redactor()
+        req_headers = [
+            {"name": h["name"], "value": redactor.redact_header_value(h["name"], h["value"])}
+            for h in ex["headers"]["request"]
+        ]
+        resp_headers = [
+            {"name": h["name"], "value": redactor.redact_header_value(h["name"], h["value"])}
+            for h in ex["headers"]["response"]
+        ]
+        req_body = (
+            redactor.redact_body_bytes(ex["bodies"]["request"], ex.get("req_content_type"))
+            if ex["bodies"]["request"]
+            else None
+        )
+        resp_body = (
+            redactor.redact_body_bytes(ex["bodies"]["response"], ex.get("resp_content_type"))
+            if ex["bodies"]["response"]
+            else None
+        )
 
         req_ct = ex.get("req_content_type") or _get_header_value(req_headers, "content-type") or ""
         resp_ct = (
@@ -156,7 +172,16 @@ def show(
             if body is None or (isinstance(body, bytes) and len(body) == 0):
                 cl = _get_header_value(headers, "content-length")
                 return None, True, int(cl) if cl and cl.isdigit() else None
-            return _decode_body(body, ct, raw=raw, content_encoding=enc), False, None
+            decoded = _decode_body(body, ct, raw=raw, content_encoding=enc)
+            redacted_decoded = redactor.redact_data_structure(decoded)
+            return (
+                redacted_decoded if isinstance(redacted_decoded, str) else decoded,
+                False,
+                None,
+            )
+
+        clean_url = redactor.redact_url(ex.get("url")) if ex.get("url") else None
+        clean_query = redactor.redact_query_string(ex.get("query")) if ex.get("query") else None
 
         if as_json:
             payload: dict[str, object] = {}
@@ -166,7 +191,7 @@ def show(
                 )
                 req_obj: dict[str, object] = {
                     "method": ex.get("method"),
-                    "url": ex.get("url"),
+                    "url": clean_url,
                     "headers": {h["name"]: h["value"] for h in req_headers},
                     "body": req_decoded,
                 }
@@ -195,9 +220,8 @@ def show(
                 click.echo("=== Request ===")
                 method = ex.get("method", "GET")
                 path = ex.get("path", "/")
-                query = ex.get("query")
-                if query:
-                    path = f"{path}?{query}"
+                if clean_query:
+                    path = f"{path}?{clean_query}"
                 click.echo(f"{method} {path} HTTP/1.1")
                 for h in req_headers:
                     click.echo(f"{h['name']}: {h['value']}")
@@ -264,8 +288,13 @@ def cat(
         ct_field = "req_content_type" if use_request else "resp_content_type"
         ct = ex.get(ct_field) or _get_header_value(headers, "content-type") or ""
         enc = _get_header_value(headers, "content-encoding")
-        text = _decode_body(body, ct, raw=raw, content_encoding=enc)
+        redactor = get_redactor()
+        clean_body = redactor.redact_body_bytes(body, ct)
+        text = _decode_body(clean_body, ct, raw=raw, content_encoding=enc)
         if text:
+            redacted_text = redactor.redact_data_structure(text)
+            if isinstance(redacted_text, str):
+                text = redacted_text
             click.echo(text)
 
 
@@ -281,7 +310,7 @@ def cat(
 )
 @click.option("--db", "db_path", help="Path to SQLite exchange DB (defaults to config)")
 def export(exchange_id: int, fmt: str, db_path: str | None):
-    """Export a captured exchange as a runnable command.
+    """Export a captured exchange as a sanitized command.
 
     Currently supports curl format.
     """
@@ -302,6 +331,7 @@ def export(exchange_id: int, fmt: str, db_path: str | None):
 
     with _open_db(db_path) as db:
         ex = db.get_exchange(exchange_id)
+        redactor = get_redactor()
         req_headers = ex["headers"]["request"]
         req_body = ex["bodies"]["request"]
         method = ex.get("method", "GET")
@@ -311,21 +341,27 @@ def export(exchange_id: int, fmt: str, db_path: str | None):
         parts = [f"curl -X '{safe_method}'"]
 
         for h in req_headers:
-            if h["name"].lower() in _HOP_BY_HOP:
+            name = h["name"]
+            if name.lower() in _HOP_BY_HOP:
                 continue
-            # Shell-safe: use single quotes, escaping embedded single quotes
-            val = f"{h['name']}: {h['value']}"
+            redacted_val = redactor.redact_header_value(name, h["value"])
+            val = f"{name}: {redacted_val}"
             safe = val.replace("'", "'\\''")
             parts.append(f"  -H '{safe}'")
 
         if req_body:
             ct = ex.get("req_content_type") or _get_header_value(req_headers, "content-type") or ""
-            body_text = _decode_body(req_body, ct, raw=True)
+            clean_req_body = redactor.redact_body_bytes(req_body, ct)
+            body_text = _decode_body(clean_req_body, ct, raw=True) if clean_req_body else ""
             if body_text:
+                redacted_body_text = redactor.redact_data_structure(body_text)
+                if isinstance(redacted_body_text, str):
+                    body_text = redacted_body_text
                 safe_body = body_text.replace("'", "'\\''")
                 parts.append(f"  --data-raw '{safe_body}'")
 
-        safe_url = url.replace("'", "'\\''")
+        clean_url = redactor.redact_url(url) or url
+        safe_url = clean_url.replace("'", "'\\''")
         parts.append(f"  '{safe_url}'")
 
         click.echo(" \\\n".join(parts))
@@ -384,6 +420,12 @@ def search(
             limit=limit,
             offset=offset,
         )
+        redactor = get_redactor()
+        for r in results:
+            if "url" in r and r["url"]:
+                r["url"] = redactor.redact_url(str(r["url"]))
+            if "query" in r and r["query"]:
+                r["query"] = redactor.redact_query_string(str(r["query"]))
         if as_json:
             click.echo(_json.dumps(results, ensure_ascii=False))
         else:
@@ -586,6 +628,12 @@ def around(
             service_key=service_key,
             limit=limit,
         )
+        redactor = get_redactor()
+        for r in rows:
+            if "url" in r and r["url"]:
+                r["url"] = redactor.redact_url(str(r["url"]))
+            if "query" in r and r["query"]:
+                r["query"] = redactor.redact_query_string(str(r["query"]))
         if as_json:
             click.echo(_json.dumps(rows, ensure_ascii=False))
         else:
@@ -637,6 +685,15 @@ def session(
             limit=limit,
             filter_noise=not no_filter_noise,
         )
+        redactor = get_redactor()
+        items_obj = payload.get("items")
+        if isinstance(items_obj, list):
+            for item in items_obj:
+                if isinstance(item, dict):
+                    if "url" in item and item["url"]:
+                        item["url"] = redactor.redact_url(str(item["url"]))
+                    if "query" in item and item["query"]:
+                        item["query"] = redactor.redact_query_string(str(item["query"]))
         if as_json:
             click.echo(_json.dumps(payload, ensure_ascii=False))
         else:
