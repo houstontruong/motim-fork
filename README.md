@@ -2,22 +2,34 @@
 
 **M**odel **O**ver **T**raffic — **I**ntercept & **M**anage
 
-A search, inspect, and replay layer over network traffic for AI agents.
+A production-safe API discovery, schema observation, and inspection substrate for AI agents.
 
-motim runs a local proxy that captures HTTP(S) traffic into a SQLite database. Agents query it via CLI to understand how web services work and operate on them — no API docs, no credential wiring, no guesswork.
+motim runs a local proxy that captures HTTP(S) traffic into a SQLite database with mandatory redaction-before-persistence and egress filtering. AI agents query the database and generated specs to understand how web services work, map endpoint patterns, and analyze schemas — with zero risk of credential leaks or uncontrolled request mutations.
 
 ```
-Browser                              Agent
-   │                                   │
-   ▼                                   ▼
-┌──────────┐    ┌────────────┐    ┌──────────────┐
-│  motim   │───▶│  SQLite    │◀───│  search      │
-│  proxy   │    │  (traffic) │    │  inspect     │
-│  :8080   │    │            │    │  replay      │
-└──────────┘    └────────────┘    └──────────────┘
+Browser / Client                           Agent
+       │                                     │
+       ▼                                     ▼
+┌──────────────┐      ┌────────────┐   ┌──────────────┐
+│  motim proxy │─────▶│  SQLite    │◀──│  search      │
+│  (allowlist) │ (PII │  (traffic) │   │  inspect     │
+│  :8080       │ scrub│            │   │  discover    │
+└──────────────┘      └────────────┘   └──────────────┘
 ```
 
-You browse a site. motim records every request and response. Now your agent can search that traffic, understand the API, and replay requests — with the exact auth, headers, and body the browser used.
+You browse a site or run integration tests. motim records requests and responses while automatically stripping tokens, cookies, passwords, and private keys. Your agent searches and inspects that traffic, builds schema models, and extracts API contracts — safely and deterministically.
+
+---
+
+## Key Features
+
+- **🛡️ Redaction-Before-Persistence (Gate G2)**: All sensitive tokens, Bearer/Basic headers, session cookies, JWTs, and API credentials are sanitized on the ingest hot-path before touching SQLite or disk files.
+- **🚫 Replay & Probe Removed at Source (Gate G1)**: Mutation probe engines and active replay tools have been permanently excised, ensuring no state mutations or fund movements can be accidentally triggered.
+- **🔒 Egress Allowlist & Loopback-Only Bind (Gate G3)**: Default deny-all egress filtering prevents unauthorized outbound calls; proxy binds exclusively to `127.0.0.1` / `::1`.
+- **🔍 Read-Only Discovery Engine (Gate G4)**: High-level Python discovery API (`discover()`, `discover_services()`) and CLI tools for mapping endpoints, schemas, and parameter variations.
+- **📂 Secure Storage Defaults**: Strict POSIX file permissions (`0700` directories, `0600` files) and 1 MB payload limits to safeguard storage.
+
+---
 
 ## Examples
 
@@ -28,34 +40,20 @@ motim search --host api.example.com --method POST --json
 motim show 42 --json    # full request + response
 ```
 
-**Agent replays a captured request:**
+**Agent compares two observed exchanges:**
 ```bash
-motim replay 42 --json
-motim replay 42 --patch-json '{"page_size": 50}' --json
-motim replay 42 --set-header "x-custom=value" --json
-```
-
-**Agent investigates a failure:**
-```bash
-motim search --host api.example.com --status 403 --json
 motim diff 42 43 --json
-motim around 42 --window 60 --json    # nearby exchanges
+motim around 42 --window 60 --json    # nearby exchanges in session
 ```
 
-**Agent probes an endpoint:**
-```bash
-motim probe 42 \
-  --patch-json '{"admin": true}' \
-  --drop-header "authorization" \
-  --json
-```
-
-**Agent extracts endpoints from JavaScript:**
+**Agent extracts endpoints from frontend JavaScript bundles:**
 ```bash
 motim linkfinder --host app.example.com --regex '^/api/' --json
 ```
 
 Every command supports `--json` for machine-readable output.
+
+---
 
 ## Install
 
@@ -65,97 +63,114 @@ pip install motim
 
 Optional extras:
 ```bash
-pip install 'motim[curl]'        # browser TLS fingerprinting
 pip install 'motim[linkfinder]'  # JS endpoint extraction
 ```
 
+---
+
 ## Getting started
 
-```bash
-motim init          # create dirs, trust CA cert, install agent skill
-motim start         # start proxy on localhost:8080
-# point your browser at localhost:8080 (use FoxyProxy or set system-wide)
-# browse normally — traffic flows into ~/.motim/motim.sqlite3
-```
+1. **Initialize motim**:
+   ```bash
+   motim init          # create secure dirs (0700), trust CA cert, install agent skill
+   ```
 
-## Agent integration
+2. **Configure Allowlist (`~/.motim/config.yaml`)**:
+   ```yaml
+   capture:
+     allowed_hosts:
+       - "api.example.com"
+       - "*.bybit.com"
+   ```
 
-motim ships a skill file that teaches agents how to use it.
+3. **Start Proxy**:
+   ```bash
+   motim proxy start --port 8080 --listen-host 127.0.0.1
+   # Configure your browser or test suite to use localhost:8080
+   # Sanitized traffic flows into ~/.motim/motim.sqlite3
+   ```
+
+---
+
+## Agent Integration
+
+motim ships a skill file that teaches agents how to inspect traffic safely.
 
 ```bash
 motim init              # auto-installs skill for Claude Code
 motim agents-md         # writes AGENTS.md for Codex, opencode, etc.
 ```
 
-The skill gives agents a decision tree: when to search, when to replay, when to probe, how to handle auth failures. Agents use the CLI with `--json` — no Python SDK needed.
+---
 
-## CLI reference
+## CLI Reference
 
 ```bash
-# Proxy
-motim start                     # start capture proxy
-motim stop                      # stop proxy
-motim status                    # check proxy status
-motim doctor                    # health check
+# Proxy Management
+motim proxy start [--port 8080] [--listen-host 127.0.0.1]
+motim proxy stop
+motim proxy status
+motim doctor                    # health and security check
 
-# Search & inspect
+# Search & Inspect
 motim search [--host H] [--method M] [--status S] [--path-contains P]
-motim show ID                   # full exchange
+motim show ID                   # full sanitized exchange
 motim cat ID                    # response body only
 motim cat ID --request          # request body only
-motim export ID                 # as curl command
 motim endpoints [--service S]   # endpoint patterns
-motim services list              # captured services
+motim services list             # captured services
 
-# Replay & mutate
-motim replay ID                 # replay as-is
-motim replay ID --patch-json '...'           # patch JSON body
-motim replay ID --set-header "k=v"           # add/override header
-motim replay ID --drop-header "k"            # strip header
-motim replay ID --transport curl --impersonate chrome  # TLS fingerprint
-
-# Analyze
+# Analysis & Discovery
 motim diff A B                  # diff two exchanges
-motim probe ID [--patch-json ...] [--drop-header ...]  # mutation testing
 motim around ID --window 60     # time-window slice
 motim session ID                # session reconstruction
-motim replay-seq ID1 ID2 ID3    # sequential replay
 
-# JS analysis
+# JS Analysis
 motim linkfinder [--host H] [--regex R]
 motim js-endpoints [--service S]
 
-# Misc
-motim export-yaml SERVICE       # YAML summary
+# Configuration & Maintenance
+motim export-yaml SERVICE       # YAML spec summary
 motim rebuild-index             # rebuild derived indexes
 motim config show               # view config
 ```
 
-## Python library
+---
+
+## Python Discovery API
 
 ```python
-from motim import get, Client, ExchangeDB
+from motim import discover, discover_services, ExchangeDB
 
-# One-liner
-r = get("api_example_com", "/v1/users/me")
+# List all captured services
+services = discover_services()
 
-# Client
-client = Client("example")
-r = client.get("/v1/users/me")
+# Inspect endpoint schemas and detected auth scheme
+svc = discover("binance_futures")
+print(svc.auth_type)     # 'api_key'
+print(svc.endpoints)     # ['GET /fapi/v1/ticker/price', ...]
 
-# Direct DB access
+# Inspect structured endpoint details
+for ep in svc.list_endpoints():
+    print(ep.method, ep.path, ep.sample_count, ep.statuses_seen)
+
+# Query SQLite database directly
 with ExchangeDB("~/.motim/motim.sqlite3") as db:
     results = db.search_exchanges(host="api.example.com", limit=10)
 ```
 
-## Development
+---
+
+## Security & Verification
+
+See [SECURITY.md](file:///C:/Users/houst/PycharmProjects/motim-fork/SECURITY.md) for full details on threat models, redaction algorithms, and egress controls.
+Run the complete security gate verification suite:
 
 ```bash
-git clone https://github.com/vaibhavk97/motim.git
-cd motim
-pip install -e ".[dev]"
-pytest
+pytest tests/test_gates.py
 ```
+
+---
 
 ## License
 

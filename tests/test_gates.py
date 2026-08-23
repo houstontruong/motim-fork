@@ -328,4 +328,41 @@ class TestGate4DiscoveryAndSafeStorage:
             assert (db_path.stat().st_mode & 0o777) == 0o600
 
 
+class TestGate5DocumentationAndDeliverables:
+    """Gate G5 — Complete deliverables, security documentation, and regression green."""
+
+    def test_required_deliverables_exist(self):
+        project_root = Path(__file__).parent.parent
+        required_files = [
+            "SECURITY.md",
+            "ROADMAP.md",
+            "motim-phase-b-report.md",
+            "README.md",
+            "motim/skill.md",
+        ]
+        for req in required_files:
+            file_path = project_root / req
+            assert file_path.exists(), f"Required deliverable {req} does not exist"
+            assert file_path.stat().st_size > 100, f"Required deliverable {req} is empty or too short"
+
+    def test_security_policy_content(self):
+        project_root = Path(__file__).parent.parent
+        security_text = (project_root / "SECURITY.md").read_text()
+        assert "Redaction-Before-Persistence" in security_text
+        assert "Egress Allowlist" in security_text
+        assert "Loopback-Only" in security_text
+
+    def test_roadmap_content(self):
+        project_root = Path(__file__).parent.parent
+        roadmap_text = (project_root / "ROADMAP.md").read_text()
+        assert "Phase B" in roadmap_text
+        assert "Gate G1" in roadmap_text
+        assert "Gate G2" in roadmap_text
+        assert "Gate G3" in roadmap_text
+        assert "Gate G4" in roadmap_text
+        assert "Gate G5" in roadmap_text
+        assert "Phase C" in roadmap_text
+
+
+
 
