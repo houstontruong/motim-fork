@@ -175,3 +175,73 @@ class TestGate2RedactionBeforePersistence:
         finally:
             writer.close()
 
+
+class TestGate3EgressAllowlistAndLoopback:
+    """Gate G3 — Egress allowlist enforcement and loopback-only bind.
+
+    Asserts:
+    - Default policy is deny-all (empty allowlist blocks all destinations).
+    - Requests to non-allowlisted destinations receive immediate 403 Forbidden.
+    - Requests to allowlisted destinations are forwarded.
+    - Proxy bind enforces loopback-only interfaces (127.0.0.1, ::1) and rejects 0.0.0.0.
+    """
+
+    def test_default_deny_all_policy(self):
+        from motim.proxy.addon import is_host_allowed
+
+        assert not is_host_allowed("api.github.com", [])
+        assert not is_host_allowed("api.bybit.com", None)
+        assert not is_host_allowed("127.0.0.1", [])
+
+    def test_allowlist_filtering_and_403_rejection(self):
+        from motim.config import Config
+        from motim.proxy.addon import MotimAddon
+
+        addon = MotimAddon()
+        config = Config()
+        config.capture.allowed_hosts = ["api.bybit.com", "*.deribit.com"]
+        addon._config = config
+
+        class MockRequest:
+            def __init__(self, host: str):
+                self.host = host
+                self.pretty_host = host
+
+        class MockFlow:
+            def __init__(self, host: str):
+                self.request = MockRequest(host)
+                self.response = None
+
+        # 1. Allowed destinations
+        flow_allowed_1 = MockFlow("api.bybit.com")
+        addon.request(flow_allowed_1)
+        assert flow_allowed_1.response is None
+
+        flow_allowed_2 = MockFlow("test.deribit.com")
+        addon.request(flow_allowed_2)
+        assert flow_allowed_2.response is None
+
+        # 2. Blocked destination
+        flow_blocked = MockFlow("malicious-exfiltration.com")
+        addon.request(flow_blocked)
+        assert flow_blocked.response is not None
+        assert flow_blocked.response.status_code == 403
+        assert flow_blocked.response.headers.get("x-motim-egress-blocked") == "1"
+
+    def test_loopback_only_bind_enforcement(self):
+        from click.testing import CliRunner
+        from motim.cli.proxy import proxy
+
+        runner = CliRunner()
+
+        # Reject 0.0.0.0
+        res_all_interfaces = runner.invoke(proxy, ["start", "--listen-host", "0.0.0.0"])
+        assert res_all_interfaces.exit_code != 0
+        assert "Security violation" in res_all_interfaces.output or "prohibited" in res_all_interfaces.output
+
+        # Reject external routable IP
+        res_external_ip = runner.invoke(proxy, ["start", "--listen-host", "192.168.1.50"])
+        assert res_external_ip.exit_code != 0
+        assert "Security violation" in res_external_ip.output or "prohibited" in res_external_ip.output
+
+

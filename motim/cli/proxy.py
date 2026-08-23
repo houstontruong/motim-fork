@@ -34,8 +34,15 @@ def proxy():
     type=click.IntRange(1, 65535),
     help="Proxy port (default: 8080)",
 )
+@click.option(
+    "--listen-host",
+    "-h",
+    default="127.0.0.1",
+    show_default=True,
+    help="Listen host (must be loopback, e.g. 127.0.0.1 or ::1)",
+)
 @click.option("--verbose", "-v", is_flag=True, help="Show all requests (including skipped)")
-def start(port: int, verbose: bool):
+def start(port: int, listen_host: str, verbose: bool):
     """Start the proxy server.
 
     The proxy will capture HTTP(S) traffic and generate API specs
@@ -43,6 +50,28 @@ def start(port: int, verbose: bool):
 
     Configure your browser or system to use localhost:PORT as proxy.
     """
+    import ipaddress
+
+    # Strictly enforce loopback-only bind
+    is_loopback = False
+    if listen_host.lower() in ("127.0.0.1", "localhost", "::1"):
+        is_loopback = True
+    else:
+        try:
+            ip = ipaddress.ip_address(listen_host)
+            if ip.is_loopback:
+                is_loopback = True
+        except ValueError:
+            pass
+
+    if not is_loopback:
+        click.echo(
+            f"Error: Security violation: Motim proxy only binds to loopback interfaces (e.g. 127.0.0.1). "
+            f"Binding to external address '{listen_host}' is prohibited.",
+            err=True,
+        )
+        raise click.Abort()
+
     if PID_FILE.exists():
         pid = int(PID_FILE.read_text().strip())
         try:
@@ -67,7 +96,7 @@ def start(port: int, verbose: bool):
         click.echo(f"Addon not found: {addon_path}")
         raise click.Abort()
 
-    click.echo(f"Starting proxy on localhost:{port}")
+    click.echo(f"Starting proxy on {listen_host}:{port}")
     click.echo("Configure your browser/system to use this as HTTP(S) proxy")
     click.echo("Press Ctrl+C to stop\n")
 
@@ -82,7 +111,7 @@ def start(port: int, verbose: bool):
                 "--mode",
                 "regular",
                 "--listen-host",
-                "127.0.0.1",
+                listen_host,
                 "--listen-port",
                 str(port),
                 "-s",
