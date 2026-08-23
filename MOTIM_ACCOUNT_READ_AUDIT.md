@@ -56,3 +56,13 @@ Preserve source line numbering (or explicitly document otherwise) and add a lead
 4. Do not alter the offline-only safety boundary or broaden into capture/live-account work.
 
 If you see a better approach than this brief describes, say so and explain why before changing direction.
+
+## Round 2 — Required follow-up after `770f700`
+
+The first remediation fixed the original 7 findings and passed 171 clean-venv tests, but a fresh Codex audit found three remaining edge cases. Fix all three with regressions:
+
+1. **MEDIUM — iterable/dict API values bypass non-finite rejection** (`motim/reconcile/engine.py:265`). Raw JSON input rejects `NaN`/`Infinity`, but direct iterable/dict library inputs can carry nested non-finite values through validation. Apply one recursive finite-value validation rule before adapter dispatch for both input forms. It must return the structured `invalid_input` outcome without leaking values.
+2. **MEDIUM — library `max_age_seconds` accepts non-integer/non-finite numbers** (`motim/reconcile/engine.py:189`). Enforce a finite, non-negative integer at the library boundary; reject floats including `NaN`/infinity with `invalid_input`. Keep the CLI and API semantics aligned.
+3. **LOW — ambiguous valid file paths are treated as literal JSONL** (`motim/reconcile/engine.py:62`). Preserve literal-JSONL support without making existing paths inaccessible merely because their names begin with `{` or contain a newline. Prefer a safe `Path.exists()` attempt with `OSError` handling before choosing literal parsing, then add a regression test.
+
+Update the report, run the full suite, commit/push, and request the same final verification. Do not broaden scope.
