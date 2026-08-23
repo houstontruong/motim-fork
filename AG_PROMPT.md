@@ -1,4 +1,4 @@
-# AG_PROMPT.md — Motim Account-Read Reconciliation: Final Confidentiality Remediation
+# AG_PROMPT.md — Motim Account-Read Reconciliation: Round 8 Confidentiality Remediation
 
 Working directory: `C:\Users\houst\PycharmProjects\motim-fork`
 
@@ -6,14 +6,13 @@ Read `./SPEC.md` before coding. Treat it as a brief, not a blueprint.
 
 ## Task
 
-Remediate the four findings from a fresh independent Codex audit of the existing **offline-only** account-read reconciliation layer. Read `SPEC.md`, `ACCOUNT_READ_CONTRACT.md`, `MOTIM_ACCOUNT_READ_AUDIT.md`, `motim-account-read-audit-fix.md`, the report, and the current tests before changing code. Preserve all prior fixes through `31132ea`; do not weaken the no-auth-input boundary.
+Remediate the three findings from the fresh independent Codex audit of exact commit `52c882e` in the existing **offline-only** account-read reconciliation layer. Read `SPEC.md`, `ACCOUNT_READ_CONTRACT.md`, `MOTIM_ACCOUNT_READ_AUDIT.md`, `motim-account-read-audit-fix.md`, the report, and the current tests before changing code. Preserve all prior fixes; do not weaken the no-auth-input boundary.
 
 The audit reproduced these defects:
 
-1. A route key containing URL query credentials is accepted at reconciliation ingest and can be emitted verbatim in an `unsupported_schema` issue. Reject credential-bearing URL/userinfo/query material before adapters can echo it; errors must be redacted and must produce zero facts.
-2. `Redactor.redact_url()` leaves URL userinfo credentials visible, including URLs without query strings. Sanitization must handle userinfo robustly as well as sensitive query fields.
-3. `Redactor.redact_data_structure()` only traverses dict/list, leaving sensitive values inside supported non-list containers unchanged. Make direct structural redaction safely recursive across relevant mapping/tuple/set-like input without breaking deterministic or JSON-safe output expectations.
-4. `Redactor.redact_body_bytes()` can preserve plaintext form-shaped auth fields when content type is unknown. Apply a fail-closed treatment that masks sensitive key/value material without corrupting legitimate benign content unnecessarily.
+1. **Fail-open unknown/generic bodies (HIGH):** `Redactor.redact_body_bytes()` returns unknown/generic non-UTF-8 bodies unchanged. UTF-16, compressed, or otherwise non-UTF-8 form-like credential material can therefore persist raw values; generic UTF-8 text such as `password: SECRET123` also survives the current form/regex paths. Adopt a safe, fail-closed strategy for unparseable or unsupported encodings/content types while preserving benign, recognized content where feasible. Add direct and persistence-path regressions with unique canaries.
+2. **Percent-encoded key bypass (HIGH):** `validator._is_auth_string()` does not URL-decode query field names before sensitivity checks. A percent-encoded key such as `api%5Fkey=...` can pass validation and expose its value through facts. Decode query and fragment components before normalized sensitivity matching, reject the entire input with `invalid_input`, zero facts, and no canary leakage. Cover Bybit and Lighter, direct API, JSONL, and CLI paths.
+3. **Fragment reflection (MEDIUM):** Route fragments are not parsed for credentials, and unsupported-route messages can echo `positions#api_key=SECRET123`. Treat fragment parameters as auth material for validation and sanitize every unsupported-route message defensively so no route-derived secret is reflected even if validation changes later.
 
 Choose the smallest robust approach satisfying the offline account-read contract. Add focused direct and end-to-end regressions for each finding, including nested variants and zero-fact/redacted-error behavior. Preserve strict no-network/no-replay/no-real-credentials guarantees. Never capture traffic, sign in, make an HTTP/WebSocket request, open a socket, reintroduce replay/export of credential-bearing data, or create a real-capture runbook.
 
@@ -41,7 +40,7 @@ When all outputs are written, run this in PowerShell to notify OpenClaw:
 $topic = "ag-openclaw-b4zaCyNakC3zMJ566TYCa0ifoXdprXhwu9gm5UjdiJs"
 $payload = @{
   schema = "ag.ntfy.v1"
-  job = "motim-account-read-codex-fixes-7"
+  job = "motim-account-read-codex-fixes-8"
   status = "complete"
   project_dir = "C:\Users\houst\PycharmProjects\motim-fork"
   required = @("motim-account-read-audit-fix.md", "motim-account-read-report.md")
