@@ -68,6 +68,13 @@ class BufferedExchangeWriter:
         self._started = True
         self._thread.start()
 
+    def flush(self, timeout: float = 5.0) -> None:
+        """Wait until current queue items are processed."""
+        deadline = time.monotonic() + timeout
+        while (not self._q.empty() or self.written < self.enqueued) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.05)
+
     def close(self) -> None:
         """Stop the worker and flush remaining items."""
         if not self._started:

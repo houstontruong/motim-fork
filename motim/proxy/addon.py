@@ -6,20 +6,26 @@ sanitized summaries, samples, and auth headers into the MOTIM spec store.
 
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
 import sys
 import time
 from datetime import datetime
+from typing import Sequence
 
-from mitmproxy import http
+try:
+    from mitmproxy import http
+except ImportError:  # pragma: no cover
+    http = None
 
 from motim.config import get_config
 from motim.exchange_db import ExchangeDB, HeaderField
 from motim.exchange_writer import BufferedExchangeWriter
 from motim.proxy.filters import should_capture_with_config
 from motim.proxy.pipeline import CapturePipeline
+from motim.redact import Redactor, get_redactor
 from motim.store import Store
 
 # ANSI colors
@@ -30,6 +36,29 @@ GRAY = "\033[90m"
 RED = "\033[91m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
+
+
+def is_host_allowed(host: str | None, allowed_hosts: Sequence[str] | None) -> bool:
+    """Check if a host is permitted by the egress allowlist.
+
+    If allowed_hosts is empty or None, access is denied by default (zero-trust egress).
+    Wildcard patterns like `*`, `*.example.com`, or standard globs are supported.
+    """
+    if not allowed_hosts or not host:
+        return False
+    host_clean = host.lower().split(":")[0].strip()
+    for pattern in allowed_hosts:
+        p = pattern.lower().strip()
+        if p == "*":
+            return True
+        if p.startswith("*."):
+            suffix = p[1:]  # .example.com
+            domain = p[2:]  # example.com
+            if host_clean.endswith(suffix) or host_clean == domain:
+                return True
+        elif fnmatch.fnmatch(host_clean, p) or host_clean == p:
+            return True
+    return False
 
 
 class MotimAddon:
@@ -43,6 +72,7 @@ class MotimAddon:
         self._exchange_db: ExchangeDB | None = None
         self._exchange_writer: BufferedExchangeWriter | None = None
         self._pipeline: CapturePipeline | None = None
+        self._redactor: Redactor | None = None
         self._config = None
 
         # Hot-path profiling accumulators
@@ -53,6 +83,25 @@ class MotimAddon:
         self._hp_t_enqueue_ms = 0.0
         self._hp_req_bytes = 0
         self._hp_resp_bytes = 0
+
+    @property
+    def redactor(self) -> Redactor:
+        """Lazy-load redactor configured from settings."""
+        if self._redactor is None:
+            r_cfg = getattr(self.config.capture, "redaction", None)
+            profile = getattr(r_cfg, "profile", "strict") if r_cfg else "strict"
+            placeholder = getattr(r_cfg, "placeholder", "[REDACTED]") if r_cfg else "[REDACTED]"
+            extra_h = getattr(r_cfg, "extra_sensitive_headers", ()) if r_cfg else ()
+            extra_q = getattr(r_cfg, "extra_sensitive_params", ()) if r_cfg else ()
+            extra_k = getattr(r_cfg, "extra_sensitive_keys", ()) if r_cfg else ()
+            self._redactor = Redactor(
+                profile=profile,
+                placeholder=placeholder,
+                extra_headers=extra_h,
+                extra_query_params=extra_q,
+                extra_key_substrings=extra_k,
+            )
+        return self._redactor
 
     @property
     def store(self) -> Store:
@@ -114,6 +163,7 @@ class MotimAddon:
             self._pipeline = CapturePipeline(
                 store=self.store,
                 exchange_writer=self.exchange_writer,
+                redactor=self.redactor,
                 write_specs=self.config.capture.write_specs,
                 max_parse_bytes=self.config.capture.pipeline_max_parse_bytes,
                 queue_max=self.config.capture.pipeline_queue_max,
@@ -122,6 +172,27 @@ class MotimAddon:
                 profile_every_n=self.config.capture.profile_every_n,
             )
         return self._pipeline
+
+    def request(self, flow: http.HTTPFlow) -> None:
+        """Called when a request is received. Enforces egress allowlist."""
+        host = getattr(flow.request, "pretty_host", None) or flow.request.host
+        allowed_hosts = getattr(self.config.capture, "allowed_hosts", [])
+        if not is_host_allowed(host, allowed_hosts):
+            if http is not None and hasattr(http, "Response"):
+                flow.response = http.Response.make(
+                    403,
+                    f"403 Forbidden: Destination '{host}' is not in Motim egress allowlist.\n".encode("utf-8"),
+                    {"content-type": "text/plain", "x-motim-egress-blocked": "1"},
+                )
+            else:
+                flow.response = type(
+                    "DummyResponse",
+                    (),
+                    {"status_code": 403, "content": b"403 Forbidden", "headers": {"x-motim-egress-blocked": "1"}},
+                )()
+            if self.verbose:
+                print(f"{RED}[EGRESS BLOCKED]{RESET} Request to disallowed host: {host}")
+                sys.stdout.flush()
 
     @staticmethod
     def _header_fields(headers_obj) -> list[HeaderField]:
@@ -226,14 +297,17 @@ class MotimAddon:
         else:
             # Fallback: legacy synchronous behavior.
             templatized_path = self._templatize_path(path_only)
+            redacted_req_h = self.redactor.redact_headers_dict(request_headers)
+            redacted_resp_h = self.redactor.redact_headers_dict(response_headers)
+            redacted_qp = self.redactor.redact_data_structure(dict(query_string)) if query_string else None
             self.store.update(
                 host=host,
                 scheme=scheme,
                 method=method,
                 path=templatized_path,
-                query_params=dict(query_string) if query_string else None,
-                request_headers=request_headers,
-                response_headers=response_headers,
+                query_params=redacted_qp,
+                request_headers=redacted_req_h,
+                response_headers=redacted_resp_h,
                 request_body=None,
                 response_body=None,
                 status_code=status,

@@ -22,6 +22,7 @@ from typing import Any, Mapping
 from motim.exchange_db import HeaderField
 from motim.exchange_writer import BufferedExchangeWriter
 from motim.normalize import templatize_path
+from motim.redact import Redactor, get_redactor
 from motim.store import Store
 
 
@@ -35,16 +36,21 @@ def _decode_header_fields(raw_fields: list[tuple[bytes, bytes]] | None) -> list[
     fields: list[HeaderField] = []
     if not raw_fields:
         return fields
-    for name_b, value_b in raw_fields:
-        try:
-            name = name_b.decode("latin-1")
-        except Exception:
-            name = str(name_b)
-        try:
-            value = value_b.decode("latin-1")
-        except Exception:
-            value = str(value_b)
-        fields.append(HeaderField(name=name, value=value))
+    for item in raw_fields:
+        if isinstance(item, HeaderField):
+            fields.append(item)
+            continue
+        if isinstance(item, tuple) and len(item) == 2:
+            name_b, value_b = item
+            try:
+                name = name_b.decode("latin-1") if isinstance(name_b, bytes) else str(name_b)
+            except Exception:
+                name = str(name_b)
+            try:
+                value = value_b.decode("latin-1") if isinstance(value_b, bytes) else str(value_b)
+            except Exception:
+                value = str(value_b)
+            fields.append(HeaderField(name=name, value=value))
     return fields
 
 
@@ -105,6 +111,7 @@ class CapturePipeline:
         *,
         store: Store,
         exchange_writer: BufferedExchangeWriter | None,
+        redactor: Redactor | None = None,
         write_specs: bool = True,
         max_parse_bytes: int = 200_000,
         queue_max: int = 5_000,
@@ -114,6 +121,7 @@ class CapturePipeline:
     ):
         self.store = store
         self.exchange_writer = exchange_writer
+        self.redactor = redactor or get_redactor()
         self.write_specs = write_specs
         self.max_parse_bytes = max_parse_bytes
         self.drop_when_full = drop_when_full
@@ -141,15 +149,19 @@ class CapturePipeline:
         self._started = True
         self._thread.start()
 
-    def close(self) -> None:
+    def close(self, timeout: float = 5.0) -> None:
         if not self._started:
             return
         self._stop.set()
         try:
-            self._thread.join(timeout=5)
+            self._thread.join(timeout=timeout)
         except Exception:
             pass
         self._started = False
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Alias for close()."""
+        self.close(timeout=timeout)
 
     def enqueue(self, kind: str, payload: Mapping[str, Any]) -> bool:
         if not self._started:
@@ -220,6 +232,7 @@ class CapturePipeline:
                 break
 
     def _process_http(self, p: dict[str, Any]) -> None:
+        p = self.redactor.redact_flow_payload(p)
         host = str(p["host"])
         scheme = p.get("scheme")
         method = str(p["method"])
@@ -298,6 +311,7 @@ class CapturePipeline:
             self._t_db_enqueue_ms += (time.perf_counter() - t_dbq) * 1000.0
 
     def _process_ws(self, p: dict[str, Any]) -> None:
+        p = self.redactor.redact_flow_payload(p)
         host = str(p["host"])
         scheme = p.get("scheme")
         path_only = str(p["path_only"])

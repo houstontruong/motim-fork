@@ -53,3 +53,125 @@ class TestGate1ReplayRemovedAtSource:
             assert not hasattr(db, "record_replay"), "Found forbidden record_replay method on ExchangeDB"
         finally:
             db.close()
+
+
+class TestGate2RedactionBeforePersistence:
+    """Gate G2 — Synthetic test traffic with known fake API keys/tokens.
+
+    Asserts:
+    - Zero sensitive tokens in SQLite DB and YAML files on disk.
+    - Headers, query params, and body payloads (JSON/form/text) are redacted before storage.
+    - Auth tokens, session cookies, passwords, and private keys never touch disk unmasked.
+    """
+
+    def test_synthetic_traffic_redaction_proof(self, tmp_path: Path):
+        import json
+        from motim.exchange_db import ExchangeDB, HeaderField
+        from motim.exchange_writer import BufferedExchangeWriter
+        from motim.proxy.pipeline import CapturePipeline
+        from motim.redact import Redactor
+        from motim.store import Store
+
+        # Canary tokens that must NEVER appear in persistence
+        CANARY_TOKENS = [
+            "sk_live_canary_secret_token_12345",
+            "eyCanaryJwtHeader.eyCanaryJwtPayload.Signature67890",
+            "super_secret_login_password_abc",
+            "session_cookie_secret_xyz999",
+            "query_param_api_secret_456",
+        ]
+
+        spec_dir = tmp_path / "specs"
+        store = Store(specs_dir=spec_dir)
+        db_path = tmp_path / "motim.sqlite3"
+        writer = BufferedExchangeWriter(db_path, flush_interval_ms=10, queue_max=100)
+        redactor = Redactor(profile="strict")
+
+        pipeline = CapturePipeline(
+            store=store,
+            exchange_writer=writer,
+            redactor=redactor,
+        )
+        pipeline.start()
+
+        try:
+            req_body_json = json.dumps(
+                {
+                    "api_key": CANARY_TOKENS[0],
+                    "jwt": CANARY_TOKENS[1],
+                    "password": CANARY_TOKENS[2],
+                    "public_field": "visible_ok",
+                }
+            ).encode("utf-8")
+
+            pipeline.enqueue(
+                "http",
+                {
+                    "scheme": "https",
+                    "host": "test-canary.example.com",
+                    "port": 443,
+                    "method": "POST",
+                    "status": 200,
+                    "path": f"/v1/secure?token={CANARY_TOKENS[4]}",
+                    "path_only": "/v1/secure",
+                    "query": f"token={CANARY_TOKENS[4]}",
+                    "query_params": {"token": CANARY_TOKENS[4]},
+                    "url": f"https://test-canary.example.com/v1/secure?token={CANARY_TOKENS[4]}",
+                    "service_key": "test_canary_example_com",
+                    "request_headers": {
+                        "Authorization": f"Bearer {CANARY_TOKENS[0]}",
+                        "Cookie": f"session={CANARY_TOKENS[3]}",
+                        "X-API-Key": CANARY_TOKENS[0],
+                        "Content-Type": "application/json",
+                    },
+                    "response_headers": {
+                        "Content-Type": "application/json",
+                        "Set-Cookie": f"session={CANARY_TOKENS[3]}; Path=/",
+                    },
+                    "req_fields": [
+                        HeaderField("Authorization", f"Bearer {CANARY_TOKENS[0]}"),
+                        HeaderField("Cookie", f"session={CANARY_TOKENS[3]}"),
+                        HeaderField("X-API-Key", CANARY_TOKENS[0]),
+                    ],
+                    "resp_fields": [
+                        HeaderField("Set-Cookie", f"session={CANARY_TOKENS[3]}; Path=/"),
+                    ],
+                    "req_body": req_body_json,
+                    "resp_body": b'{"status": "ok"}',
+                    "req_content_type": "application/json",
+                    "resp_content_type": "application/json",
+                },
+            )
+
+            pipeline.stop(timeout=3.0)
+            writer.close()
+            store.flush()
+
+            # 1. Audit all files on disk under tmp_path
+            for file_path in tmp_path.rglob("*"):
+                if file_path.is_file():
+                    content_bytes = file_path.read_bytes()
+                    for canary in CANARY_TOKENS:
+                        canary_b = canary.encode("utf-8")
+                        assert canary_b not in content_bytes, (
+                            f"LEAK DETECTED: Canary token {canary!r} found in file {file_path}"
+                        )
+
+            # 2. Audit SQLite DB tables directly
+            db = ExchangeDB(db_path)
+            try:
+                cur = db._conn.cursor()
+                for table in ["exchanges", "headers", "bodies", "auth_snapshots", "endpoints_index", "services_index"]:
+                    rows = cur.execute(f"SELECT * FROM {table}").fetchall()
+                    for row in rows:
+                        row_str = " ".join(str(v) for v in row)
+                        for canary in CANARY_TOKENS:
+                            assert canary not in row_str, (
+                                f"LEAK DETECTED: Canary token {canary!r} found in table {table}"
+                            )
+            finally:
+                db.close()
+
+        finally:
+            writer.close()
+

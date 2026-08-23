@@ -48,6 +48,19 @@ services:
 
 # Proxy capture settings
 capture:
+  # Egress allowlist: explicit domains permitted for proxying (default: empty / deny all)
+  # Examples: ["api.example.com", "*.target-service.com"]
+  allowed_hosts: []
+
+  # Redaction settings (redaction-before-persistence engine)
+  redaction:
+    enabled: true
+    profile: strict  # strict | standard
+    placeholder: "[REDACTED]"
+    extra_sensitive_headers: []
+    extra_sensitive_params: []
+    extra_sensitive_keys: []
+
   # Headers to never capture
   skip_headers:
     - accept-encoding

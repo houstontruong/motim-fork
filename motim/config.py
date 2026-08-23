@@ -59,9 +59,23 @@ class HeaderProfile:
 
 
 @dataclass
+class RedactionSettings:
+    """Settings for credential and secret redaction."""
+
+    enabled: bool = True
+    profile: str = "strict"
+    placeholder: str = "[REDACTED]"
+    extra_sensitive_headers: list[str] = field(default_factory=list)
+    extra_sensitive_params: list[str] = field(default_factory=list)
+    extra_sensitive_keys: list[str] = field(default_factory=list)
+
+
+@dataclass
 class CaptureSettings:
     """Settings for the proxy capture behavior."""
 
+    allowed_hosts: list[str] = field(default_factory=list)
+    redaction: RedactionSettings = field(default_factory=RedactionSettings)
     skip_headers: list[str] = field(
         default_factory=lambda: [
             "accept-encoding",
@@ -216,7 +230,19 @@ class Config:
                 )
 
         capture_data = data.get("capture") or {}
+        redaction_data = capture_data.get("redaction") or {}
+        redaction = RedactionSettings(
+            enabled=bool(redaction_data.get("enabled", True)),
+            profile=str(redaction_data.get("profile", "strict")),
+            placeholder=str(redaction_data.get("placeholder", REDACTED_PLACEHOLDER if "REDACTED_PLACEHOLDER" in globals() else "[REDACTED]")),
+            extra_sensitive_headers=list(redaction_data.get("extra_sensitive_headers", [])),
+            extra_sensitive_params=list(redaction_data.get("extra_sensitive_params", [])),
+            extra_sensitive_keys=list(redaction_data.get("extra_sensitive_keys", [])),
+        )
+
         capture = CaptureSettings(
+            allowed_hosts=list(capture_data.get("allowed_hosts", [])),
+            redaction=redaction,
             skip_headers=capture_data.get("skip_headers", CaptureSettings().skip_headers),
             skip_domains=capture_data.get("skip_domains", CaptureSettings().skip_domains),
             max_samples_per_endpoint=capture_data.get("max_samples_per_endpoint", 50),
@@ -272,6 +298,15 @@ class Config:
                 for name, s in self.services.items()
             },
             "capture": {
+                "allowed_hosts": self.capture.allowed_hosts,
+                "redaction": {
+                    "enabled": self.capture.redaction.enabled,
+                    "profile": self.capture.redaction.profile,
+                    "placeholder": self.capture.redaction.placeholder,
+                    "extra_sensitive_headers": self.capture.redaction.extra_sensitive_headers,
+                    "extra_sensitive_params": self.capture.redaction.extra_sensitive_params,
+                    "extra_sensitive_keys": self.capture.redaction.extra_sensitive_keys,
+                },
                 "skip_headers": self.capture.skip_headers,
                 "skip_domains": self.capture.skip_domains,
                 "max_samples_per_endpoint": self.capture.max_samples_per_endpoint,
