@@ -100,6 +100,19 @@ def test_redactor_raw_body_bytes_redaction():
     assert b"secretpass123" not in redacted_form_b
     assert b"username=alice" in redacted_form_b
 
+    # Malformed / unparseable JSON (fail closed)
+    malformed_json = b'{"password": "secret", "incomplete'
+    redacted_malformed = redactor.redact_body_bytes(malformed_json, "application/json")
+    assert b"secret" not in redacted_malformed
+    assert b"[REDACTED" in redacted_malformed
+
+    # Non-string dictionary keys
+    mixed_dict = {123: "val", "token": "secret_tok_456"}
+    redacted_mixed = redactor.redact_data_structure(mixed_dict)
+    assert redacted_mixed[123] == "val"
+    assert redacted_mixed["token"] == "[REDACTED]"
+
+
 
 def test_pipeline_redaction_before_persistence(tmp_path: Path):
     spec_dir = tmp_path / "specs"

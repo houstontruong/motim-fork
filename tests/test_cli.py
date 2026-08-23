@@ -152,11 +152,12 @@ class TestExportCommand:
         assert result.exit_code == 0
         assert "curl -X 'POST'" in result.output
         assert "-H 'Content-Type: application/json'" in result.output
-        assert "-H 'Authorization: Bearer tok123'" in result.output
+        assert "-H 'Authorization: Bearer [REDACTED]'" in result.output
         # Host should be skipped (hop-by-hop)
         assert "-H 'Host:" not in result.output
         assert "--data-raw" in result.output
         assert "https://api.example.com/v1/users?active=true" in result.output
+
 
     def test_export_curl_no_body(self, tmp_path: Path):
         db_path = tmp_path / "motim.sqlite3"

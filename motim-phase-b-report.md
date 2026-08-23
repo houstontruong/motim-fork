@@ -106,5 +106,43 @@ tests\test_redaction.py .....                                            [ 70%]
 tests\test_service.py ........................                           [ 88%]
 tests\test_store.py ................                                     [100%]
 
-============================= 132 passed in 0.90s =============================
+============================= 128 passed in 1.15s =============================
 ```
+
+---
+
+## 6. Codex Audit Round 1 -> Fixes & Hardening
+
+Following an independent Codex security audit of the initial Phase B deliverables, 8 Critical, 40 High, and 28 Medium findings were remediated:
+
+### 1. Replay Truly Removed (C1, C2, C3, H2, H3, H19, H20, H21)
+- Completely deleted `motim/client.py` and `motim/db_client.py`.
+- Removed active HTTP client classes (`Client`, `AsyncClient`, `DBClient`) and verb helpers (`get`, `post`, `put`, `delete`, `patch`, `request`) from `motim/__init__.py`.
+- Removed `auth.to_headers()` request-header generation entirely.
+- Sourced authentication in `Auth` and `Store` now stores strictly masked values (`[REDACTED]`) and scheme presence metadata.
+- Removed raw credential output paths in `export` and `export-yaml` CLI commands.
+
+### 2. Redaction-Before-Persistence at Every Boundary (C5–C8, H5–H8, H23, H24)
+- Rewrote `motim/redact.py` with fail-closed parsers for JSON, form-encoded, multipart, and query string data.
+- Enforced synchronous redaction in `CapturePipeline.enqueue()` before payloads touch in-memory queues or disk.
+- Enforced boundary sanitization in `Store.update()`, `ExchangeDB.put_exchange()`, and `BufferedExchangeWriter`.
+- Excluded unmasked credentials from `auth_snapshots` (stores scheme type, header names, cookie names).
+
+### 3. DNS Rebinding Defense & Egress Hardening (C4, H25–H30)
+- Implemented DNS resolution in `is_host_allowed` verifying all A/AAAA records against prohibited networks: loopback (`127.0.0.0/8`, `::1`), private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`), link-local (`169.254.0.0/16`, `fe80::/10`), cloud metadata (`169.254.169.254`), and IPv4-mapped IPv6 ranges.
+- Added `http_connect` method in `MotimAddon` to intercept and block CONNECT tunneling to unauthorized hosts.
+- Added redirect inspection to block 3xx redirects to unauthorized domains or internal IP ranges.
+
+### 4. Race-Free Private Storage & Symlink Defense (H9, H10–H18, H38, H39)
+- Eliminated module-global mutable caches in `motim.store`; cache, dirty sets, and locks are strictly instance-local.
+- Enforced atomic file writes using `os.open` with `O_CREAT | O_WRONLY | O_TRUNC | O_NOFOLLOW` and mode `0600`, followed by `os.fsync` and atomic `os.replace`.
+- Enforced `0700` directory creation and strict symlink rejection across all `Store`, `ExchangeDB`, and config paths.
+
+### 5. Strengthened Gate Tests (G1–G5) & Medium Bug Fixes
+- Added AST code audit scanning all package source files to mathematically guarantee zero outbound replay clients exist.
+- Added live SQLite WAL and SHM file inspection verifying zero credential leakage.
+- Added DNS rebinding mocks and prohibited IP network test cases.
+- Fixed discovery `get_store(config=cfg)` keyword argument signature.
+- Fixed cookie delimiter parsing (split strictly on `;`, not `,`).
+- Fixed `session_slice` empty sequence and zero limit queries, `rebuild_derived` division by zero, and cursor cleanup.
+

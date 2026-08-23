@@ -665,7 +665,9 @@ def session(
     help="Output YAML path (default: ~/.motim/exports/<service>.yaml)",
 )
 def export_yaml(service: str, db_path: str | None, out_path: str | None):
-    """Export a lightweight YAML summary from the SQLite DB (optional artifact)."""
+    """Export a sanitized lightweight YAML summary from the SQLite DB."""
+    import os
+    import time
     from urllib.parse import urlparse
 
     import yaml
@@ -679,13 +681,18 @@ def export_yaml(service: str, db_path: str | None, out_path: str | None):
         endpoint_lines = [f"{e['method']} {e['path_template']}" for e in endpoints]
 
         snap = db.latest_auth_snapshot(skey)
-        auth_headers = (snap or {}).get("headers") if snap else None
+        auth_type = (snap or {}).get("auth_type") or "none"
+        header_names = (snap or {}).get("header_names") or []
+        cookie_names = (snap or {}).get("cookie_names") or []
+        redacted_auth_headers = {str(name): "[REDACTED]" for name in header_names}
 
         doc = {
             "service": host or skey.replace("_", "."),
             "base_url": origin or (f"https://{host}" if host else ""),
             "auth": {
-                "headers": auth_headers or {},
+                "type": auth_type,
+                "headers": redacted_auth_headers,
+                "cookie_names": cookie_names,
                 "last_seen": (snap or {}).get("ts") if snap else None,
             },
             "observed_endpoints": endpoint_lines,
@@ -696,12 +703,37 @@ def export_yaml(service: str, db_path: str | None, out_path: str | None):
         }
 
         dest = (
-            Path(out_path).expanduser()
+            Path(out_path).expanduser().resolve()
             if out_path
-            else (Path.home() / ".motim" / "exports" / f"{skey}.yaml")
+            else (Path.home() / ".motim" / "exports" / f"{skey}.yaml").resolve()
         )
+        if dest.is_symlink() or dest.parent.is_symlink():
+            raise PermissionError(f"Security violation: export destination cannot be a symlink: {dest}")
+
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text(yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+        if os.name != "nt":
+            try:
+                dest.parent.chmod(0o700)
+            except Exception:
+                pass
+
+        temp_dest = dest.parent / f".tmp_export_{os.getpid()}_{time.time_ns()}.yaml"
+        yaml_bytes = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True).encode("utf-8")
+        flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(temp_dest, flags, 0o600)
+        try:
+            os.write(fd, yaml_bytes)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+        if os.name != "nt":
+            try:
+                temp_dest.chmod(0o600)
+            except Exception:
+                pass
+
+        os.replace(temp_dest, dest)
         click.echo(str(dest))
 
 
@@ -747,11 +779,12 @@ def init(skip_cert: bool):
     """Initialize MOTIM (create dirs, install CA cert, install skill).
 
     This command:
-    1. Creates ~/.motim/specs/ directory
-    2. Creates default config if not exists
+    1. Creates ~/.motim/specs/ directory with 0700 permissions
+    2. Creates default config if not exists with 0600 permissions
     3. Generates and trusts the mitmproxy CA certificate
     4. Installs the agent skill file
     """
+    import os
     import platform
     import subprocess
     import time
@@ -771,22 +804,42 @@ def init(skip_cert: bool):
     click.echo("MOTIM Initialization")
     click.echo("=" * 60)
 
-    # Step 1: Create directories
+    # Step 1: Create directories with 0700 permissions
     click.echo("\n[1/4] Creating directories...")
     MOTIM_DIR.mkdir(parents=True, exist_ok=True)
     SPECS_DIR.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        try:
+            MOTIM_DIR.chmod(0o700)
+            SPECS_DIR.chmod(0o700)
+        except Exception:
+            pass
     click.echo(f"       {MOTIM_DIR} ✓")
 
     # Step 2: Create default config if not exists
     click.echo("\n[2/4] Setting up configuration...")
     if not CONFIG_FILE.exists() and DEFAULT_CONFIG.exists():
-        CONFIG_FILE.write_text(DEFAULT_CONFIG.read_text())
+        temp_cfg = MOTIM_DIR / f".tmp_config_{os.getpid()}_{time.time_ns()}.yaml"
+        flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(temp_cfg, flags, 0o600)
+        try:
+            os.write(fd, DEFAULT_CONFIG.read_bytes())
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        if os.name != "nt":
+            try:
+                temp_cfg.chmod(0o600)
+            except Exception:
+                pass
+        os.replace(temp_cfg, CONFIG_FILE)
         click.echo(f"       {CONFIG_FILE} ✓ (created)")
     else:
         click.echo(f"       {CONFIG_FILE} ✓ (exists)")
 
     # Step 3: Certificate setup
     click.echo("\n[3/4] Certificate setup...")
+    cert_ok = False
     if skip_cert:
         click.echo("       Skipped (use 'motim proxy trust-cert' later)")
     else:
@@ -807,6 +860,7 @@ def init(skip_cert: bool):
 
         if CA_CERT.exists():
             click.echo(f"       {CA_CERT} ✓")
+            cert_ok = True
 
             # Trust certificate based on platform
             system = platform.system()
@@ -848,7 +902,7 @@ def init(skip_cert: bool):
     click.echo("\n[4/4] Installing agent skill...")
     SKILL_DIR.mkdir(parents=True, exist_ok=True)
     if SKILL_SOURCE.exists():
-        SKILL_DEST.write_text(SKILL_SOURCE.read_text())
+        SKILL_DEST.write_text(SKILL_SOURCE.read_text(encoding="utf-8"), encoding="utf-8")
         click.echo(f"       {SKILL_DIR}/ ✓")
     else:
         click.echo(f"       ✗ Skill source not found: {SKILL_SOURCE}", err=True)

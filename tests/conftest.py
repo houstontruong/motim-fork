@@ -6,20 +6,14 @@ from pathlib import Path
 import pytest
 
 from motim.config import Config
-from motim.store import Store, _cache, _cache_lock, _dirty
+from motim.store import Store
 
 
 @pytest.fixture(autouse=True)
 def reset_store_globals():
-    """Reset global cache state before each test."""
-    with _cache_lock:
-        _cache.clear()
-        _dirty.clear()
+    """Fixture ensuring clean environment."""
     yield
-    # Cleanup after test too
-    with _cache_lock:
-        _cache.clear()
-        _dirty.clear()
+
 
 
 @pytest.fixture

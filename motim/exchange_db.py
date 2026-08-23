@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from .normalize import format_cookie_header, parse_cookie_header, templatize_path
+from .redact import HeaderField, Redactor, get_redactor
+
 
 
 def _utcnow_iso() -> str:
@@ -102,34 +104,42 @@ def _extract_from_js_text(text: str) -> Iterable[str]:
             yield out
 
 
-@dataclass(frozen=True)
-class HeaderField:
-    name: str
-    value: str
-
-
 class ExchangeDB:
     """SQLite exchange database."""
 
-    def __init__(self, path: Path, *, max_body_bytes: int = 1_000_000):
+
+    def __init__(self, path: Path | str, *, max_body_bytes: int = 1_000_000, redactor: Redactor | None = None):
         import os
 
-        self.path = Path(path).expanduser()
+        self.path = Path(path).expanduser().resolve()
         self.max_body_bytes = max_body_bytes
+        self._redactor = redactor or get_redactor()
+
+        if self.path.is_symlink() or self.path.parent.is_symlink():
+            raise PermissionError(f"Security violation: DB path cannot be a symlink: {self.path}")
+
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if os.name != "nt":
             try:
                 self.path.parent.chmod(0o700)
-            except Exception:
-                pass
-        self._conn = sqlite3.connect(self.path)
+                parent_mode = self.path.parent.stat().st_mode & 0o777
+                if parent_mode != 0o700 and (parent_mode & 0o077 != 0):
+                    raise PermissionError(f"Failed to enforce private 0700 mode on {self.path.parent}")
+            except OSError as e:
+                raise PermissionError(f"Failed to enforce parent directory permissions: {e}") from e
+
+        self._conn = sqlite3.connect(str(self.path))
         self._conn.row_factory = sqlite3.Row
         self._init_db()
+
         if os.name != "nt":
             try:
                 self.path.chmod(0o600)
-            except Exception:
-                pass
+                file_mode = self.path.stat().st_mode & 0o777
+                if file_mode != 0o600 and (file_mode & 0o077 != 0):
+                    raise PermissionError(f"Failed to enforce private 0600 mode on {self.path}")
+            except OSError as e:
+                raise PermissionError(f"Failed to enforce database file permissions: {e}") from e
 
     def close(self) -> None:
         self._conn.close()
@@ -306,14 +316,14 @@ class ExchangeDB:
                 pass
 
     def latest_auth_snapshot(self, service_key: str) -> dict[str, object] | None:
-        """Return the most recent auth snapshot for a service_key."""
+        """Return the most recent auth snapshot for a service_key (metadata only)."""
         skey = self.resolve_service_key(service_key) or service_key
         cur = self._conn.cursor()
         try:
             row = cur.execute(
                 """
-                SELECT id, service_key, ts, cookie_header, cookie_hash,
-                       headers_json, source_exchange_id
+                SELECT id, service_key, ts, auth_type, header_names_json,
+                       cookie_names_json, source_exchange_id
                   FROM auth_snapshots
                  WHERE service_key = ?
                  ORDER BY ts DESC, id DESC
@@ -323,21 +333,34 @@ class ExchangeDB:
             ).fetchone()
             if row is None:
                 return None
-            headers_json = row["headers_json"]
-            headers: dict[str, str] = {}
-            if isinstance(headers_json, str) and headers_json:
+
+            header_names: list[str] = []
+            if row["header_names_json"]:
                 try:
-                    parsed = json.loads(headers_json)
-                    if isinstance(parsed, dict):
-                        headers = {str(k): str(v) for k, v in parsed.items()}
+                    parsed = json.loads(row["header_names_json"])
+                    if isinstance(parsed, list):
+                        header_names = [str(x) for x in parsed]
                 except Exception:
-                    headers = {}
+                    header_names = []
+
+            cookie_names: list[str] = []
+            if row["cookie_names_json"]:
+                try:
+                    parsed = json.loads(row["cookie_names_json"])
+                    if isinstance(parsed, list):
+                        cookie_names = [str(x) for x in parsed]
+                except Exception:
+                    cookie_names = []
+
+            # Present headers dict with redacted values so callers never get raw credentials
+            headers = {name: "[REDACTED]" for name in header_names}
             return {
                 "id": int(row["id"]),
                 "service_key": str(row["service_key"]),
                 "ts": str(row["ts"]),
-                "cookie_header": row["cookie_header"],
-                "cookie_hash": row["cookie_hash"],
+                "auth_type": row["auth_type"],
+                "header_names": header_names,
+                "cookie_names": cookie_names,
                 "headers": headers,
                 "source_exchange_id": row["source_exchange_id"],
             }
@@ -445,6 +468,7 @@ class ExchangeDB:
 
         This is required whenever the DB has exchanges but derived tables are empty/out-of-date.
         """
+        batch_sz = max(1, int(batch_size))
         cur = self._conn.cursor()
         try:
             cur.execute("BEGIN;")
@@ -499,7 +523,7 @@ class ExchangeDB:
                     req_headers=req_headers,
                 )
                 rebuilt += 1
-                if rebuilt % int(batch_size) == 0:
+                if rebuilt % batch_sz == 0:
                     self._conn.commit()
                     cur.execute("BEGIN;")
 
@@ -531,6 +555,9 @@ class ExchangeDB:
 
         This is the core DB primitive for time-based sequencing (no workflow graph).
         """
+        if limit <= 0:
+            return []
+
         cur = self._conn.cursor()
         try:
             seed = cur.execute(
@@ -595,6 +622,9 @@ class ExchangeDB:
         prefer_success: bool = False,
     ) -> list[dict]:
         """Return exchanges in a timestamp range (inclusive)."""
+        if limit <= 0:
+            return []
+
         cur = self._conn.cursor()
         try:
             clauses: list[str] = ["ts >= ? AND ts <= ?"]
@@ -667,7 +697,13 @@ class ExchangeDB:
 
             items: list[dict] = [dict(r) for r in rows]
             if not items:
-                return {"service_key": skey, "seed_id": exchange_id, "items": []}
+                return {
+                    "service_key": str(skey),
+                    "seed_id": int(exchange_id),
+                    "gap_seconds": float(gap_seconds),
+                    "id_window": int(id_window),
+                    "items": [],
+                }
 
             # Optional noise filtering (still DB-first; no workflow graph).
             if filter_noise:
@@ -692,6 +728,15 @@ class ExchangeDB:
                         continue
                     filtered.append(it)
                 items = filtered
+
+            if not items:
+                return {
+                    "service_key": str(skey),
+                    "seed_id": int(exchange_id),
+                    "gap_seconds": float(gap_seconds),
+                    "id_window": int(id_window),
+                    "items": [],
+                }
 
             # Find segment boundaries by time gaps.
             gap = float(gap_seconds)
@@ -727,7 +772,9 @@ class ExchangeDB:
                 right += 1
 
             slice_items = items[left : right + 1]
-            if len(slice_items) > int(limit):
+            if limit <= 0:
+                slice_items = []
+            elif len(slice_items) > int(limit):
                 slice_items = slice_items[-int(limit) :]
 
             return {
@@ -859,9 +906,9 @@ class ExchangeDB:
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               service_key TEXT NOT NULL,
               ts TEXT NOT NULL,
-              cookie_header TEXT,
-              cookie_hash TEXT,
-              headers_json TEXT,
+              auth_type TEXT,
+              header_names_json TEXT,
+              cookie_names_json TEXT,
               source_exchange_id INTEGER,
               FOREIGN KEY(source_exchange_id) REFERENCES exchanges(id) ON DELETE SET NULL
             );
@@ -884,23 +931,19 @@ class ExchangeDB:
 
     @staticmethod
     def _auth_header_subset(req_headers: Sequence[HeaderField]) -> dict[str, str]:
-        """Extract a best-effort subset of auth-relevant headers.
-
-        Note: This is intentionally heuristic. The goal is to keep a stable auth bundle
-        for replay/chaining, not to preserve full-fidelity request headers.
-        """
+        """Extract a best-effort subset of auth-relevant header presence (redacted)."""
         out: dict[str, str] = {}
         for h in req_headers:
             name = str(h.name)
             lower = name.lower()
             if lower in {"authorization", "cookie"}:
-                out[name] = str(h.value)
+                out[name] = "[REDACTED]"
                 continue
             if "csrf" in lower or "xsrf" in lower:
-                out[name] = str(h.value)
+                out[name] = "[REDACTED]"
                 continue
             if "api-key" in lower or "apikey" in lower:
-                out[name] = str(h.value)
+                out[name] = "[REDACTED]"
                 continue
         return out
 
@@ -984,45 +1027,57 @@ class ExchangeDB:
             (ts, ts, is_success, status, is_success, exchange_id, skey, method, path_template),
         )
 
-        # Auth snapshot (best-effort): store on successful exchanges with auth-ish headers.
+        # Auth snapshot (metadata only): store on successful exchanges with auth headers.
         if is_success and has_auth:
-            cookie_header = None
-            for k, v in auth_subset.items():
-                if k.lower() == "cookie":
-                    cookie_header = v
-                    break
+            header_names = list(auth_subset.keys())
+            cookie_names: list[str] = []
+            auth_type = "custom"
 
-            cookie_hash = None
-            canonical_cookie = None
-            if isinstance(cookie_header, str) and cookie_header:
-                cookies = parse_cookie_header(cookie_header)
-                canonical_cookie = format_cookie_header(cookies) if cookies else cookie_header
-                cookie_hash = hashlib.sha256(
-                    canonical_cookie.encode("utf-8", errors="ignore")
-                ).hexdigest()
+            for h in req_headers:
+                name_low = h.name.lower()
+                val_low = h.value.lower()
+                if name_low == "authorization":
+                    if "bearer" in val_low:
+                        auth_type = "bearer"
+                    elif "basic" in val_low:
+                        auth_type = "basic"
+                    else:
+                        auth_type = "custom"
+                elif "api-key" in name_low or "apikey" in name_low:
+                    if auth_type == "custom":
+                        auth_type = "api_key"
+                elif name_low == "cookie":
+                    if auth_type == "custom":
+                        auth_type = "cookie"
+                    try:
+                        cookies = parse_cookie_header(h.value)
+                        cookie_names.extend(list(cookies.keys()))
+                    except Exception:
+                        pass
 
-            headers_json = json.dumps(auth_subset, ensure_ascii=False, separators=(",", ":"))
+            hdr_json = json.dumps(header_names, ensure_ascii=False)
+            ck_json = json.dumps(cookie_names, ensure_ascii=False)
 
-            # Deduplicate: skip insert if the latest snapshot has identical auth data.
+            # Deduplicate: skip insert if the latest snapshot has identical metadata.
             latest = cur.execute(
-                "SELECT cookie_hash, headers_json FROM auth_snapshots "
+                "SELECT header_names_json, cookie_names_json FROM auth_snapshots "
                 "WHERE service_key = ? ORDER BY ts DESC, id DESC LIMIT 1",
                 (skey,),
             ).fetchone()
             is_dup = (
                 latest is not None
-                and latest["cookie_hash"] == cookie_hash
-                and latest["headers_json"] == headers_json
+                and latest["header_names_json"] == hdr_json
+                and latest["cookie_names_json"] == ck_json
             )
             if not is_dup:
                 cur.execute(
                     """
                     INSERT INTO auth_snapshots(
-                      service_key, ts, cookie_header, cookie_hash, headers_json, source_exchange_id
+                      service_key, ts, auth_type, header_names_json, cookie_names_json, source_exchange_id
                     )
                     VALUES (?,?,?,?,?,?)
                     """,
-                    (skey, ts, canonical_cookie, cookie_hash, headers_json, exchange_id),
+                    (skey, ts, auth_type, hdr_json, ck_json, exchange_id),
                 )
 
     def _truncate_body(self, body: bytes | None) -> tuple[bytes | None, int, bool]:
@@ -1110,12 +1165,27 @@ class ExchangeDB:
         ts: str | None = None,
     ) -> int:
         ts = ts or _utcnow_iso()
-        req_raw, req_len, req_trunc = self._truncate_body(req_body)
-        resp_raw, resp_len, resp_trunc = self._truncate_body(resp_body)
+
+        # Enforce boundary sanitization before persistence
+        clean_req_headers = self._redactor.redact_header_fields(req_headers)
+        clean_resp_headers = self._redactor.redact_header_fields(resp_headers)
+        clean_query = self._redactor.redact_query_string(query) if query else query
+        clean_url = self._redactor.redact_url(url) if url else url
+        clean_req_body = (
+            self._redactor.redact_body_bytes(req_body, req_content_type) if req_body else req_body
+        )
+        clean_resp_body = (
+            self._redactor.redact_body_bytes(resp_body, resp_content_type)
+            if resp_body
+            else resp_body
+        )
+
+        req_raw, req_len, req_trunc = self._truncate_body(clean_req_body)
+        resp_raw, resp_len, resp_trunc = self._truncate_body(clean_resp_body)
 
         # When body wasn't captured (e.g. streamed), use content-length header as best estimate.
-        if resp_body is None and resp_len == 0 and resp_headers:
-            for h in resp_headers:
+        if clean_resp_body is None and resp_len == 0 and clean_resp_headers:
+            for h in clean_resp_headers:
                 if h.name.lower() == "content-length":
                     try:
                         resp_len = int(h.value)
@@ -1140,8 +1210,8 @@ class ExchangeDB:
                 port,
                 method,
                 path,
-                query,
-                url,
+                clean_query,
+                clean_url,
                 status,
                 graphql_operation,
                 endpoint,
@@ -1150,8 +1220,8 @@ class ExchangeDB:
                 resp_content_type,
                 req_len,
                 resp_len,
-                _sha256(req_body),
-                _sha256(resp_body),
+                _sha256(clean_req_body),
+                _sha256(clean_resp_body),
                 1 if req_trunc else 0,
                 1 if resp_trunc else 0,
             ),
@@ -1160,15 +1230,15 @@ class ExchangeDB:
             raise RuntimeError("SQLite insert did not return lastrowid")
         exchange_id = int(cur.lastrowid)
 
-        if req_headers:
+        if clean_req_headers:
             cur.executemany(
                 "INSERT INTO headers(exchange_id, side, idx, name, value) VALUES (?,?,?,?,?)",
-                [(exchange_id, "request", i, h.name, h.value) for i, h in enumerate(req_headers)],
+                [(exchange_id, "request", i, h.name, h.value) for i, h in enumerate(clean_req_headers)],
             )
-        if resp_headers:
+        if clean_resp_headers:
             cur.executemany(
                 "INSERT INTO headers(exchange_id, side, idx, name, value) VALUES (?,?,?,?,?)",
-                [(exchange_id, "response", i, h.name, h.value) for i, h in enumerate(resp_headers)],
+                [(exchange_id, "response", i, h.name, h.value) for i, h in enumerate(clean_resp_headers)],
             )
 
         cur.execute(
@@ -1190,7 +1260,7 @@ class ExchangeDB:
             path=path,
             status=status,
             service_key=service_key,
-            req_headers=req_headers,
+            req_headers=clean_req_headers,
         )
 
         return exchange_id
@@ -1198,32 +1268,38 @@ class ExchangeDB:
     def get_exchange(self, exchange_id: int) -> dict:
         """Fetch a single exchange with headers and bodies."""
         cur = self._conn.cursor()
-        row = cur.execute("SELECT * FROM exchanges WHERE id = ?", (exchange_id,)).fetchone()
-        if row is None:
-            raise KeyError(exchange_id)
+        try:
+            row = cur.execute("SELECT * FROM exchanges WHERE id = ?", (exchange_id,)).fetchone()
+            if row is None:
+                raise KeyError(exchange_id)
 
-        headers_rows = cur.execute(
-            "SELECT side, idx, name, value FROM headers WHERE exchange_id = ? ORDER BY side, idx",
-            (exchange_id,),
-        ).fetchall()
-        bodies_rows = cur.execute(
-            "SELECT side, raw FROM bodies WHERE exchange_id = ?",
-            (exchange_id,),
-        ).fetchall()
+            headers_rows = cur.execute(
+                "SELECT side, idx, name, value FROM headers WHERE exchange_id = ? ORDER BY side, idx",
+                (exchange_id,),
+            ).fetchall()
+            bodies_rows = cur.execute(
+                "SELECT side, raw FROM bodies WHERE exchange_id = ?",
+                (exchange_id,),
+            ).fetchall()
 
-        headers: dict[str, list[dict[str, str]]] = {"request": [], "response": []}
-        for r in headers_rows:
-            headers[r["side"]].append({"name": r["name"], "value": r["value"]})
+            headers: dict[str, list[dict[str, str]]] = {"request": [], "response": []}
+            for r in headers_rows:
+                headers[r["side"]].append({"name": r["name"], "value": r["value"]})
 
-        bodies: dict[str, bytes | None] = {"request": None, "response": None}
-        for r in bodies_rows:
-            bodies[r["side"]] = r["raw"]
+            bodies: dict[str, bytes | None] = {"request": None, "response": None}
+            for r in bodies_rows:
+                bodies[r["side"]] = r["raw"]
 
-        return {
-            **dict(row),
-            "headers": headers,
-            "bodies": bodies,
-        }
+            return {
+                **dict(row),
+                "headers": headers,
+                "bodies": bodies,
+            }
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
 
     def search_exchanges(
         self,
@@ -1267,8 +1343,14 @@ class ExchangeDB:
         params.append(offset)
 
         cur = self._conn.cursor()
-        rows = cur.execute(q, params).fetchall()
-        return [dict(r) for r in rows]
+        try:
+            rows = cur.execute(q, params).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            try:
+                cur.close()
+            except Exception:
+                pass
 
     def discover_js_endpoints(
         self,

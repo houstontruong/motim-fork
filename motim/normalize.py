@@ -14,31 +14,24 @@ from typing import Mapping
 def parse_cookie_header(value: str) -> dict[str, str]:
     """Parse a Cookie header value into a dict.
 
-    The correct HTTP delimiter is `;`, but some capture contexts may produce comma-separated
-    pairs. We support both for robustness.
+    Cookie pairs in Cookie headers are strictly separated by ';' per RFC 6265.
     """
     cookies: dict[str, str] = {}
     if not value:
         return cookies
 
-    # Split on ';' first, then also split each chunk on ','.
-    # This is intentionally permissive; cookie values containing commas are rare for the
-    # scenarios MOTIM targets.
-    parts: list[str] = []
     for chunk in value.split(";"):
-        parts.extend(chunk.split(","))
-
-    for part in parts:
-        part = part.strip()
-        if not part or "=" not in part:
+        chunk = chunk.strip()
+        if not chunk or "=" not in chunk:
             continue
-        key, val = part.split("=", 1)
+        key, val = chunk.split("=", 1)
         key = key.strip()
         if not key:
             continue
         cookies[key] = val.strip()
 
     return cookies
+
 
 
 def format_cookie_header(cookies: Mapping[str, str]) -> str:

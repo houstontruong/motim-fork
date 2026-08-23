@@ -136,6 +136,7 @@ class CapturePipeline:
         self.enqueued = 0
         self.dropped = 0
         self.processed = 0
+        self.errors = 0
 
         # Profiling counters (worker thread only)
         self._t_parse_ms = 0.0
@@ -164,9 +165,12 @@ class CapturePipeline:
         self.close(timeout=timeout)
 
     def enqueue(self, kind: str, payload: Mapping[str, Any]) -> bool:
+        """Redact payload synchronously before queuing."""
         if not self._started:
             self.start()
-        evt = CaptureEvent(kind=kind, payload=dict(payload))
+        # Synchronous redaction at the enqueue boundary before queueing into memory
+        redacted_payload = self.redactor.redact_flow_payload(dict(payload))
+        evt = CaptureEvent(kind=kind, payload=redacted_payload)
         try:
             if self.drop_when_full:
                 self._q.put_nowait(evt)
@@ -185,6 +189,7 @@ class CapturePipeline:
             "enqueued": int(self.enqueued),
             "dropped": int(self.dropped),
             "processed": int(self.processed),
+            "errors": int(self.errors),
         }
 
     def _run(self) -> None:
@@ -203,8 +208,7 @@ class CapturePipeline:
                 elif evt.kind == "ws":
                     self._process_ws(evt.payload)
             except Exception:
-                # Never crash the proxy for pipeline issues.
-                pass
+                self.errors += 1
             finally:
                 self._t_total_ms += (time.perf_counter() - t0) * 1000.0
                 self.processed += 1
@@ -218,7 +222,7 @@ class CapturePipeline:
                 print(
                     "[motim profile] "
                     f"processed={self.processed} q={qsize} "
-                    f"enq={self.enqueued} drop={self.dropped} "
+                    f"enq={self.enqueued} drop={self.dropped} errors={self.errors} "
                     f"avg_ms(total={avg_total:.2f} parse={avg_parse:.2f} "
                     f"store={avg_store:.2f} dbq={avg_db:.2f})"
                 )

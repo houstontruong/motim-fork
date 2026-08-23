@@ -1,32 +1,32 @@
-"""MOTIM - Model Over Traffic, Intercept & Manage.
+"""MOTIM - Model Over Traffic, Intercept & Manage (Production-Safe Fork).
 
-MOTIM is a system for capturing, querying, and replaying API traffic.
+MOTIM captures, redacts, indexes, and surfaces web API schemas and endpoints
+for AI agents without storing raw credentials or enabling request replay.
 
 It provides:
-1. A local MITM proxy addon that observes real HTTP(S) requests/responses
-2. A local spec store written to `~/.motim/specs/` (YAML)
-3. A Python client + convenience helpers to replay authenticated requests using captured auth
-4. A skill file that teaches AI agents how to use the captured specs
+1. A local MITM proxy addon that observes HTTP(S) traffic within an egress allowlist
+2. Strict redaction-before-persistence across all storage boundaries
+3. A local spec store written to `~/.motim/specs/` (YAML) with private permissions (0700/0600)
+4. An SQLite exchange database (`~/.motim/motim.sqlite3`) for schema inspection and endpoint indexing
+5. Read-only discovery APIs (`discover`, `discover_services`, `ServiceDiscovery`) for AI agents
 
 Usage:
-    # Simple one-liner
-    from motim import Client
-    r = Client("notion").get("/v1/users/me")
+    # Service discovery
+    from motim import discover, discover_services
 
-    # With more control
-    from motim import Service, Client, Auth
+    services = discover_services()
+    print(services)                   # ['notion', 'bybit', ...]
 
-    svc = Service.load("notion")
-    print(svc.auth.type)              # 'bearer'
-    print(svc.endpoints)              # ['GET /v1/users', ...]
+    # Schema inspection
+    disc = discover("notion")
+    print(disc.auth_type)             # 'bearer'
+    print(disc.base_url)              # 'https://api.notion.com'
+    print(disc.endpoints)             # ['GET /v1/users', ...]
 
-    client = Client(svc, auth_profile="full")
-    r = client.get("/v1/users/me")
-
-    # Raw access
+    # Direct spec access
     from motim import Store
     store = Store()
-    spec = store.load("notion")       # Raw dict
+    spec = store.load("notion")       # Redacted spec dict
 """
 
 from importlib.metadata import PackageNotFoundError, version
@@ -39,14 +39,9 @@ except PackageNotFoundError:  # pragma: no cover
 
 # Core classes
 from .auth import Auth
+from .config import Config, get_config, reload_config
 from .diff import diff_exchanges
 from .discovery import EndpointSummary, ServiceDiscovery, discover, discover_services
-from .redact import Redactor, get_redactor
-
-# Convenience functions
-from .client import AsyncClient, Client, delete, get, patch, post, put
-from .config import Config, get_config, reload_config
-from .db_client import DBClient
 from .exceptions import (
     AuthError,
     AuthExpiredError,
@@ -57,6 +52,7 @@ from .exceptions import (
 )
 from .exchange_db import ExchangeDB, HeaderField
 from .exchange_writer import BufferedExchangeWriter
+from .redact import Redactor, get_redactor
 from .service import EndpointCollection, Sample, SampleCollection, SampleComparison, Service
 from .store import Store, get_store
 
@@ -80,7 +76,7 @@ __all__ = [
     # Redaction
     "Redactor",
     "get_redactor",
-    # Auth
+    # Auth (metadata only)
     "Auth",
     # Service & Discovery
     "Service",
@@ -92,20 +88,10 @@ __all__ = [
     "discover_services",
     "ServiceDiscovery",
     "EndpointSummary",
-    # Client
-    "Client",
-    "AsyncClient",
-    "DBClient",
     # Exchange DB (agent substrate)
     "ExchangeDB",
     "HeaderField",
     "BufferedExchangeWriter",
     # Diff helpers
     "diff_exchanges",
-    # Convenience functions
-    "get",
-    "post",
-    "put",
-    "delete",
-    "patch",
 ]

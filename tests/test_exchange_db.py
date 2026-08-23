@@ -111,3 +111,60 @@ def test_search_exchanges_path_contains(tmp_path: Path):
         assert results[0]["path"] == "/v1/users/me"
     finally:
         db.close()
+
+
+def test_exchange_db_edge_cases_and_zero_limits(tmp_path: Path):
+    db = ExchangeDB(tmp_path / "motim.sqlite3")
+    try:
+        eid = db.put_exchange(
+            scheme="https",
+            host="edge.example.com",
+            port=443,
+            method="POST",
+            path="/v1/auth",
+            query="token=secret123",
+            url="https://edge.example.com/v1/auth?token=secret123",
+            status=200,
+            req_headers=[
+                HeaderField("Authorization", "Bearer sensitive_jwt_token_123"),
+                HeaderField("Cookie", "session=cookie_val_456"),
+            ],
+            req_body=b'{"password": "secret_pass_789"}',
+            req_content_type="application/json",
+        )
+
+        # 1. Verify boundary redaction in DB
+        ex = db.get_exchange(eid)
+        for h in ex["headers"]["request"]:
+            assert "sensitive_jwt_token_123" not in h["value"]
+            assert "cookie_val_456" not in h["value"]
+        assert b"secret_pass_789" not in ex["bodies"]["request"]
+        assert b"[REDACTED]" in ex["bodies"]["request"]
+        assert "secret123" not in str(ex["query"])
+
+        # 2. Verify auth snapshot has metadata only
+        snap = db.latest_auth_snapshot("edge_example_com")
+        assert snap is not None
+        assert snap["auth_type"] == "bearer"
+        assert "Authorization" in snap["header_names"]
+        assert "session" in snap["cookie_names"]
+        assert snap["headers"]["Authorization"] == "[REDACTED]"
+
+        # 3. Test rebuild_derived with batch_size=0 (no crash)
+        res = db.rebuild_derived(batch_size=0)
+        assert res["exchanges_processed"] == 1
+
+        # 4. Test zero limit queries (no crash, returns empty list)
+        assert db.exchanges_around(eid, limit=0) == []
+        assert db.exchanges_in_range(start_ts="2020-01-01", end_ts="2030-01-01", limit=0) == []
+
+        # 5. Test session_slice with limit=0 and noise filtering
+        slice_res = db.session_slice(eid, limit=0)
+        assert slice_res["items"] == []
+
+        # 6. Test session_slice on noise-only / non-matching items (no crash)
+        slice_res_normal = db.session_slice(eid, limit=10, filter_noise=True)
+        assert len(slice_res_normal["items"]) == 1
+    finally:
+        db.close()
+

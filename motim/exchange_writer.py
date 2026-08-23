@@ -57,6 +57,7 @@ class BufferedExchangeWriter:
         self.enqueued = 0
         self.dropped = 0
         self.written = 0
+        self.failed_items = 0
         self.flushes = 0
         self.flush_ms_total = 0.0
 
@@ -71,7 +72,7 @@ class BufferedExchangeWriter:
     def flush(self, timeout: float = 5.0) -> None:
         """Wait until current queue items are processed."""
         deadline = time.monotonic() + timeout
-        while (not self._q.empty() or self.written < self.enqueued) and time.monotonic() < deadline:
+        while (not self._q.empty() or (self.written + self.failed_items) < self.enqueued) and time.monotonic() < deadline:
             time.sleep(0.01)
         time.sleep(0.05)
 
@@ -114,12 +115,18 @@ class BufferedExchangeWriter:
             "enqueued": float(self.enqueued),
             "dropped": float(self.dropped),
             "written": float(self.written),
+            "failed_items": float(self.failed_items),
             "flushes": float(self.flushes),
             "avg_flush_ms": float(avg_flush_ms),
         }
 
     def _run(self) -> None:
-        db = ExchangeDB(self.db_path, max_body_bytes=self.max_body_bytes)
+        try:
+            db = ExchangeDB(self.db_path, max_body_bytes=self.max_body_bytes)
+        except Exception:
+            self.dropped += self._q.qsize()
+            return
+
         try:
             flush_interval = max(1, int(self.flush_interval_ms)) / 1000.0
             batch: list[dict[str, Any]] = []
@@ -143,31 +150,43 @@ class BufferedExchangeWriter:
 
                 if should_flush and batch:
                     t = time.perf_counter()
-                    self._flush_batch(db, batch)
+                    ok_count = self._flush_batch(db, batch)
                     self.flush_ms_total += (time.perf_counter() - t) * 1000.0
                     self.flushes += 1
-                    self.written += len(batch)
+                    self.written += ok_count
+                    if ok_count < len(batch):
+                        self.failed_items += (len(batch) - ok_count)
                     batch = []
                     last_flush = time.monotonic()
 
                 if self._stop.is_set() and self._q.empty() and not batch:
                     break
         finally:
-            db.close()
+            try:
+                db.close()
+            except Exception:
+                pass
 
     @staticmethod
-    def _flush_batch(db: ExchangeDB, batch: list[dict[str, Any]]) -> None:
+    def _flush_batch(db: ExchangeDB, batch: list[dict[str, Any]]) -> int:
         cur = db._conn.cursor()  # noqa: SLF001 (internal use for batching)
         try:
             cur.execute("BEGIN;")
+            count = 0
             for payload in batch:
                 db._put_exchange_no_commit(  # type: ignore[arg-type, attr-defined]
                     cur,
                     **payload,
                 )
+                count += 1
             db._conn.commit()  # noqa: SLF001
+            return count
         except Exception:
-            db._conn.rollback()  # noqa: SLF001
+            try:
+                db._conn.rollback()  # noqa: SLF001
+            except Exception:
+                pass
+            return 0
         finally:
             try:
                 cur.close()

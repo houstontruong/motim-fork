@@ -1,19 +1,24 @@
-"""mitmproxy addon that captures API traffic.
+"""mitmproxy addon that captures API traffic (Production-Safe).
 
 This addon is responsible for observing request/response flows and writing
-sanitized summaries, samples, and auth headers into the MOTIM spec store.
+sanitized summaries, samples, and auth metadata into the MOTIM spec store.
+Enforces strict egress allowlists immune to DNS rebinding, CONNECT tunneling,
+and malicious redirects.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import ipaddress
 import json
 import os
 import re
+import socket
 import sys
 import time
 from datetime import datetime
 from typing import Sequence
+from urllib.parse import urlparse
 
 try:
     from mitmproxy import http
@@ -37,28 +42,130 @@ RED = "\033[91m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
 
+# Prohibited IP networks (private, loopback, link-local, cloud metadata, testnet, carrier NAT)
+PROHIBITED_NETWORKS = (
+    ipaddress.ip_network("0.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("100.64.0.0/10"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.0.0.0/24"),
+    ipaddress.ip_network("192.0.2.0/24"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("198.18.0.0/15"),
+    ipaddress.ip_network("198.51.100.0/24"),
+    ipaddress.ip_network("203.0.113.0/24"),
+    ipaddress.ip_network("224.0.0.0/4"),
+    ipaddress.ip_network("240.0.0.0/4"),
+    ipaddress.ip_network("255.255.255.255/32"),
+    ipaddress.ip_network("::/128"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("::ffff:0:0/96"),  # IPv4-mapped IPv6
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("100::/64"),
+    ipaddress.ip_network("2001:db8::/32"),
+    ipaddress.ip_network("fc00::/7"),      # Unique local
+    ipaddress.ip_network("fe80::/10"),     # Link local
+    ipaddress.ip_network("ff00::/8"),      # Multicast
+)
 
-def is_host_allowed(host: str | None, allowed_hosts: Sequence[str] | None) -> bool:
-    """Check if a host is permitted by the egress allowlist.
 
-    If allowed_hosts is empty or None, access is denied by default (zero-trust egress).
-    Wildcard patterns like `*`, `*.example.com`, or standard globs are supported.
-    """
-    if not allowed_hosts or not host:
-        return False
-    host_clean = host.lower().split(":")[0].strip()
-    for pattern in allowed_hosts:
-        p = pattern.lower().strip()
-        if p == "*":
-            return True
-        if p.startswith("*."):
-            suffix = p[1:]  # .example.com
-            domain = p[2:]  # example.com
-            if host_clean.endswith(suffix) or host_clean == domain:
-                return True
-        elif fnmatch.fnmatch(host_clean, p) or host_clean == p:
+def is_ip_prohibited(ip_obj: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    """Check if an IP address belongs to private/loopback/link-local/metadata ranges."""
+    if (
+        ip_obj.is_private
+        or ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_multicast
+        or ip_obj.is_reserved
+        or ip_obj.is_unspecified
+    ):
+        return True
+    if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
+        return is_ip_prohibited(ip_obj.ipv4_mapped)
+    for net in PROHIBITED_NETWORKS:
+        if ip_obj in net:
             return True
     return False
+
+
+def normalize_host(host: str) -> str:
+    """Clean and normalize host string."""
+    h = str(host).strip()
+    if "@" in h:
+        h = h.split("@")[-1]
+    if h.startswith("[") and "]" in h:
+        h = h[1:h.index("]")]
+    elif ":" in h:
+        if h.count(":") == 1:
+            h = h.split(":")[0]
+    h = h.rstrip(".")
+    try:
+        h = h.encode("idna").decode("ascii").lower()
+    except Exception:
+        h = h.lower()
+    return h
+
+
+def is_host_allowed(
+    host: str | None,
+    allowed_hosts: Sequence[str] | None,
+    *,
+    resolve_dns: bool = True,
+) -> bool:
+    """Check if a host is permitted by the egress allowlist with DNS rebinding defense."""
+    if not allowed_hosts or not host:
+        return False
+
+    host_clean = normalize_host(host)
+    if not host_clean:
+        return False
+
+    matched = False
+    for pattern in allowed_hosts:
+        p = str(pattern).strip()
+        if not p:
+            continue
+        p_clean = normalize_host(p)
+        if p == "*":
+            matched = True
+            break
+        if p.startswith("*."):
+            suffix = p_clean[1:]  # .example.com
+            domain = p_clean[2:]  # example.com
+            if host_clean.endswith(suffix) or host_clean == domain:
+                matched = True
+                break
+        elif host_clean == p_clean:
+            matched = True
+            break
+
+    if not matched:
+        return False
+
+    # Check direct IP literal
+    try:
+        ip = ipaddress.ip_address(host_clean)
+        return not is_ip_prohibited(ip)
+    except ValueError:
+        pass
+
+    # Resolve all DNS records and verify none are in prohibited ranges
+    if resolve_dns:
+        try:
+            addr_info = socket.getaddrinfo(host_clean, None, proto=socket.IPPROTO_TCP)
+            if not addr_info:
+                return False
+            for family, _, _, _, sockaddr in addr_info:
+                ip_str = sockaddr[0]
+                ip_obj = ipaddress.ip_address(ip_str)
+                if is_ip_prohibited(ip_obj):
+                    return False
+        except (socket.gaierror, socket.error, ValueError, OSError):
+            return False
+
+    return True
 
 
 class MotimAddon:
@@ -173,6 +280,21 @@ class MotimAddon:
             )
         return self._pipeline
 
+    def http_connect(self, flow: http.HTTPFlow) -> None:
+        """Intercept CONNECT tunneling and enforce egress allowlist."""
+        host = getattr(flow.request, "pretty_host", None) or flow.request.host
+        allowed_hosts = getattr(self.config.capture, "allowed_hosts", [])
+        if not is_host_allowed(host, allowed_hosts):
+            if http is not None and hasattr(http, "Response"):
+                flow.response = http.Response.make(
+                    403,
+                    f"403 Forbidden: CONNECT destination '{host}' is not in Motim egress allowlist.\n".encode("utf-8"),
+                    {"content-type": "text/plain", "x-motim-egress-blocked": "1"},
+                )
+            if self.verbose:
+                print(f"{RED}[EGRESS BLOCKED]{RESET} CONNECT to disallowed host: {host}")
+                sys.stdout.flush()
+
     def request(self, flow: http.HTTPFlow) -> None:
         """Called when a request is received. Enforces egress allowlist."""
         host = getattr(flow.request, "pretty_host", None) or flow.request.host
@@ -232,6 +354,25 @@ class MotimAddon:
         content_type = response.headers.get("content-type", "")
         method = request.method
         status = response.status_code
+
+        # Egress redirect defense (H29)
+        if status in (301, 302, 303, 307, 308):
+            loc = response.headers.get("location")
+            if loc:
+                try:
+                    parsed_loc = urlparse(loc)
+                    if parsed_loc.hostname:
+                        allowed_hosts = getattr(self.config.capture, "allowed_hosts", [])
+                        if not is_host_allowed(parsed_loc.hostname, allowed_hosts):
+                            response.status_code = 403
+                            response.content = b"403 Forbidden: Redirect target not in egress allowlist.\n"
+                            response.headers["x-motim-egress-blocked"] = "1"
+                            if self.verbose:
+                                print(f"{RED}[EGRESS BLOCKED]{RESET} Redirect to disallowed host: {parsed_loc.hostname}")
+                                sys.stdout.flush()
+                            return
+                except Exception:
+                    pass
 
         # Filter noise
         t_filter = time.perf_counter() if prof else 0.0

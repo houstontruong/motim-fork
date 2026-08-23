@@ -1,7 +1,9 @@
-"""Proxy management commands for MOTIM CLI."""
+"""Proxy management commands for MOTIM CLI (Production-Safe)."""
 
 import os
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 import click
@@ -9,6 +11,44 @@ import click
 MOTIM_DIR = Path.home() / ".motim"
 PID_FILE = MOTIM_DIR / "proxy.pid"
 CA_CERT = Path.home() / ".mitmproxy" / "mitmproxy-ca-cert.pem"
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Cross-platform check if process with pid is running."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, ProcessLookupError):
+        return False
+
+
+def _write_pid_atomic(pid: int) -> None:
+    """Atomically write PID file with 0600 mode and 0700 dir permissions."""
+    MOTIM_DIR.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        try:
+            MOTIM_DIR.chmod(0o700)
+        except Exception:
+            pass
+
+    temp_pid = MOTIM_DIR / f".tmp_proxy_{os.getpid()}_{time.time_ns()}.pid"
+    flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(temp_pid, flags, 0o600)
+    try:
+        os.write(fd, f"{pid}\n".encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+    if os.name != "nt":
+        try:
+            temp_pid.chmod(0o600)
+        except Exception:
+            pass
+
+    os.replace(temp_pid, PID_FILE)
 
 
 @click.group()
@@ -73,23 +113,27 @@ def start(port: int, listen_host: str, verbose: bool):
         raise click.Abort()
 
     if PID_FILE.exists():
-        pid = int(PID_FILE.read_text().strip())
         try:
-            subprocess.run(["kill", "-0", str(pid)], check=True, capture_output=True)
-            click.echo(f"Proxy already running (PID {pid})")
-            click.echo("Stop it first: motim proxy stop")
-            return
-        except subprocess.CalledProcessError:
-            PID_FILE.unlink()
+            pid = int(PID_FILE.read_text().strip())
+            if _is_pid_alive(pid):
+                click.echo(f"Proxy already running (PID {pid})")
+                click.echo("Stop it first: motim proxy stop")
+                return
+            else:
+                PID_FILE.unlink()
+        except Exception:
+            try:
+                PID_FILE.unlink()
+            except Exception:
+                pass
 
     if not CA_CERT.exists():
         click.echo("CA certificate not found. Run 'motim init' first.")
         raise click.Abort()
 
-    # Find addon path - now in proxy/ submodule
+    # Find addon path - in proxy/ submodule
     addon_path = Path(__file__).parent.parent / "proxy" / "addon.py"
     if not addon_path.exists():
-        # Fallback to old location during transition
         addon_path = Path(__file__).parent.parent / "addon.py"
 
     if not addon_path.exists():
@@ -122,7 +166,7 @@ def start(port: int, listen_host: str, verbose: bool):
             ],
             env=env,
         )
-        PID_FILE.write_text(str(process.pid))
+        _write_pid_atomic(process.pid)
         process.wait()
     except KeyboardInterrupt:
         click.echo("\nStopping proxy...")
@@ -131,7 +175,10 @@ def start(port: int, listen_host: str, verbose: bool):
         raise click.Abort()
     finally:
         if PID_FILE.exists():
-            PID_FILE.unlink()
+            try:
+                PID_FILE.unlink()
+            except Exception:
+                pass
 
 
 @proxy.command()
@@ -141,27 +188,49 @@ def stop():
         click.echo("Proxy not running")
         return
 
-    pid = int(PID_FILE.read_text().strip())
     try:
-        subprocess.run(["kill", str(pid)], check=True)
+        pid = int(PID_FILE.read_text().strip())
+    except Exception:
+        PID_FILE.unlink()
+        click.echo("Proxy not running (invalid PID file removed)")
+        return
+
+    if not _is_pid_alive(pid):
+        PID_FILE.unlink()
+        click.echo("Proxy not running (stale PID file removed)")
+        return
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        # Give it a moment to terminate
+        time.sleep(0.5)
+        if _is_pid_alive(pid):
+            if hasattr(signal, "SIGKILL"):
+                os.kill(pid, signal.SIGKILL)
         click.echo(f"Stopped proxy (PID {pid})")
-    except subprocess.CalledProcessError:
-        click.echo("Proxy not running")
+    except Exception as e:
+        click.echo(f"Failed to stop proxy: {e}", err=True)
     finally:
         if PID_FILE.exists():
-            PID_FILE.unlink()
+            try:
+                PID_FILE.unlink()
+            except Exception:
+                pass
 
 
 @proxy.command()
 def status():
     """Check proxy status."""
     if PID_FILE.exists():
-        pid = int(PID_FILE.read_text().strip())
         try:
-            subprocess.run(["kill", "-0", str(pid)], check=True, capture_output=True)
-            click.echo(f"Proxy running (PID {pid})")
-        except subprocess.CalledProcessError:
-            click.echo("Proxy not running (stale PID file)")
+            pid = int(PID_FILE.read_text().strip())
+            if _is_pid_alive(pid):
+                click.echo(f"Proxy running (PID {pid})")
+            else:
+                click.echo("Proxy not running (stale PID file)")
+                PID_FILE.unlink()
+        except Exception:
+            click.echo("Proxy not running")
             PID_FILE.unlink()
     else:
         click.echo("Proxy not running")

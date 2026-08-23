@@ -151,3 +151,35 @@ class TestStore:
 
         # Should complete in < 100ms (no disk I/O)
         assert elapsed < 0.1, f"Buffered saves took {elapsed:.3f}s, expected < 0.1s"
+
+    def test_update_boundary_redaction(self, store):
+        """Test that store.update sanitizes all tokens, bodies, headers, and cookies."""
+        store.update(
+            host="secure.example.com",
+            method="POST",
+            path="/api/v1/login",
+            query_params={"token": "secret_query_token_123"},
+            request_headers={
+                "Authorization": "Bearer sensitive_secret_token_456",
+                "Cookie": "session_id=super_secret_cookie_789; other=1",
+            },
+            request_body={"password": "secret_password_abc", "user": "alice"},
+            response_body={"jwt": "eyJhbGciOi...secret...payload"},
+            status_code=200,
+        )
+
+        spec = store.load("secure_example_com")
+        assert spec["auth"]["type"] == "bearer"
+        assert spec["auth"]["headers"]["Authorization"] == "[REDACTED]"
+        assert spec["auth"]["cookies"]["session_id"] == "[REDACTED]"
+        assert "sensitive_secret_token_456" not in str(spec)
+        assert "super_secret_cookie_789" not in str(spec)
+        assert "secret_password_abc" not in str(spec)
+        assert "secret_query_token_123" not in str(spec)
+
+    def test_path_traversal_prevention(self, store):
+        """Test that directory traversal in service names is sanitized."""
+        path = store.save("../../etc/passwd", {"service": "evil", "observed_endpoints": []})
+        assert ".." not in str(path.name)
+        assert str(path).startswith(str(store.specs_dir))
+

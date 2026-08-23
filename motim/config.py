@@ -330,12 +330,39 @@ class Config:
         }
 
     def save(self, path: Path | None = None) -> None:
-        """Save configuration to file."""
-        if path is None:
-            path = CONFIG_FILE
+        """Save configuration to file atomically with private permissions (0600/0700)."""
+        import os
+        import time
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.dump(self.to_dict(), default_flow_style=False, sort_keys=False))
+        target = Path(path or CONFIG_FILE).expanduser().resolve()
+        if target.is_symlink() or target.parent.is_symlink():
+            raise PermissionError(f"Security violation: config path cannot be a symlink: {target}")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if os.name != "nt":
+            try:
+                target.parent.chmod(0o700)
+            except Exception:
+                pass
+
+        content = yaml.dump(self.to_dict(), default_flow_style=False, sort_keys=False).encode("utf-8")
+        temp_path = target.parent / f".tmp_config_{os.getpid()}_{time.time_ns()}.yaml"
+        flags = os.O_CREAT | os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(temp_path, flags, 0o600)
+        try:
+            os.write(fd, content)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+        if os.name != "nt":
+            try:
+                temp_path.chmod(0o600)
+            except Exception:
+                pass
+
+        os.replace(temp_path, target)
+
 
 
 # Global config instance (lazy loaded)

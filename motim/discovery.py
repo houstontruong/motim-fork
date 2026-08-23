@@ -79,7 +79,7 @@ def discover_services(
 ) -> list[str]:
     """List all discovered service names available in the store or database."""
     cfg = config or get_config()
-    st = store or get_store(cfg)
+    st = store or get_store(config=cfg)
     services = set(st.services)
     if db is not None:
         try:
@@ -99,6 +99,7 @@ def discover(
 ) -> ServiceDiscovery:
     """Load and inspect a discovered service."""
     cfg = config or get_config()
-    st = store or get_store(cfg)
+    st = store or get_store(config=cfg)
     svc = Service.load(service_name, store=st, config=cfg)
     return ServiceDiscovery(name=service_name, service=svc, db=db)
+

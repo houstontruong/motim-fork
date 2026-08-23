@@ -151,7 +151,8 @@ class TestService:
         """Test auth property."""
         service = Service.from_spec(sample_spec)
         assert service.auth.type == "bearer"
-        assert service.auth.bearer_token == "test-token-12345"
+        assert service.auth.bearer_token == "[REDACTED]"
+
 
     def test_list_all(self, store_with_spec):
         """Test listing all services."""

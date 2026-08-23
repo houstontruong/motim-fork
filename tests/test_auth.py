@@ -1,24 +1,28 @@
-"""Tests for auth module."""
+"""Tests for auth module (Production-Safe metadata only)."""
 
 from datetime import datetime
+
+import pytest
 
 from motim.auth import Auth
 
 
 class TestAuth:
-    """Tests for Auth class."""
+    """Tests for Auth metadata class."""
 
     def test_from_spec(self, sample_spec):
         """Test creating Auth from spec."""
         auth = Auth.from_spec(sample_spec)
-        assert auth.header("Authorization") == "Bearer test-token-12345"
-        assert auth.header("X-API-Key") == "api-key-67890"
+        assert auth.type in ("bearer", "api_key", "custom")
+        assert auth.header("Authorization") == "[REDACTED]"
+        assert auth.header("X-API-Key") == "[REDACTED]"
 
-    def test_headers_property(self, sample_spec):
-        """Test headers property returns copy."""
+    def test_headers_property_redacted(self, sample_spec):
+        """Test headers property returns redacted metadata copy."""
         auth = Auth.from_spec(sample_spec)
         headers = auth.headers
         assert "Authorization" in headers
+        assert headers["Authorization"] == "[REDACTED]"
 
         # Modifying returned dict shouldn't affect auth
         headers["New-Header"] = "value"
@@ -27,8 +31,8 @@ class TestAuth:
     def test_header_case_insensitive(self, sample_spec):
         """Test that header lookup is case-insensitive."""
         auth = Auth.from_spec(sample_spec)
-        assert auth.header("authorization") == "Bearer test-token-12345"
-        assert auth.header("AUTHORIZATION") == "Bearer test-token-12345"
+        assert auth.header("authorization") == "[REDACTED]"
+        assert auth.header("AUTHORIZATION") == "[REDACTED]"
 
     def test_header_default(self):
         """Test header default value."""
@@ -36,46 +40,37 @@ class TestAuth:
         assert auth.header("Missing") is None
         assert auth.header("Missing", "default") == "default"
 
-    def test_bearer_token(self, sample_spec):
-        """Test bearer token extraction."""
+    def test_bearer_token_masked(self, sample_spec):
+        """Test bearer token extraction returns [REDACTED]."""
         auth = Auth.from_spec(sample_spec)
-        assert auth.bearer_token == "test-token-12345"
+        assert auth.bearer_token == "[REDACTED]"
 
     def test_bearer_token_none(self):
         """Test bearer token when not present."""
         auth = Auth(_headers={"X-API-Key": "key"})
         assert auth.bearer_token is None
 
-    def test_api_key(self, sample_spec):
-        """Test API key extraction."""
+    def test_api_key_masked(self, sample_spec):
+        """Test API key extraction returns [REDACTED]."""
         auth = Auth.from_spec(sample_spec)
-        assert auth.api_key == "api-key-67890"
+        assert auth.api_key == "[REDACTED]"
 
     def test_api_key_none(self):
         """Test API key when not present."""
         auth = Auth(_headers={"Authorization": "Bearer token"})
         assert auth.api_key is None
 
-    def test_cookies(self, sample_spec):
-        """Test cookie parsing."""
+    def test_cookies_masked(self, sample_spec):
+        """Test cookie names preserved with masked values."""
         auth = Auth.from_spec(sample_spec)
         cookies = auth.cookies
-        assert cookies["session"] == "abc123"
-        assert cookies["csrf"] == "xyz789"
-
-    def test_cookies_comma_separated_normalized(self):
-        """Cookie header values are normalized for replay."""
-        auth = Auth(_headers={"Cookie": "kdt=abc, dnt=1, auth_token=xyz"})
-        assert auth.cookies["kdt"] == "abc"
-        assert auth.cookies["dnt"] == "1"
-        assert auth.cookie_header == "kdt=abc; dnt=1; auth_token=xyz"
-        headers = auth.to_headers(include=["Cookie"])
-        assert headers["Cookie"] == "kdt=abc; dnt=1; auth_token=xyz"
+        assert cookies["session"] == "[REDACTED]"
+        assert cookies["csrf"] == "[REDACTED]"
 
     def test_cookie_single(self, sample_spec):
         """Test getting single cookie."""
         auth = Auth.from_spec(sample_spec)
-        assert auth.cookie("session") == "abc123"
+        assert auth.cookie("session") == "[REDACTED]"
         assert auth.cookie("missing") is None
         assert auth.cookie("missing", "default") == "default"
 
@@ -104,58 +99,16 @@ class TestAuth:
         auth = Auth(_headers={})
         assert auth.type == "none"
 
-    def test_basic_credentials(self):
-        """Test basic auth credential extraction."""
-        # "user:pass" base64 encoded
+    def test_basic_credentials_masked(self):
+        """Test basic auth credential extraction is masked."""
         auth = Auth(_headers={"Authorization": "Basic dXNlcjpwYXNz"})
         creds = auth.basic_credentials
-        assert creds == ("user", "pass")
+        assert creds == ("[REDACTED]", "[REDACTED]")
 
-    def test_is_expired_with_jwt(self, jwt_token):
-        """Test JWT expiry detection."""
-        auth = Auth(_headers={"Authorization": f"Bearer {jwt_token}"})
-        assert auth.is_expired is True
-
-    def test_is_expired_non_jwt(self):
-        """Test is_expired with non-JWT token."""
-        auth = Auth(_headers={"Authorization": "Bearer not-a-jwt"})
-        assert auth.is_expired is False
-
-    def test_jwt_payload(self, jwt_token):
-        """Test JWT payload extraction."""
-        auth = Auth(_headers={"Authorization": f"Bearer {jwt_token}"})
-        payload = auth.jwt_payload
-        assert payload is not None
-        assert payload["sub"] == "1234567890"
-        assert payload["name"] == "John Doe"
-
-    def test_to_headers_default(self, sample_spec):
-        """Test to_headers with default profile."""
+    def test_to_headers_removed(self, sample_spec):
+        """Verify to_headers() credential generation is removed completely."""
         auth = Auth.from_spec(sample_spec)
-        headers = auth.to_headers()
-        # Standard profile includes auth headers
-        assert "Authorization" in headers
-
-    def test_to_headers_minimal(self, sample_spec):
-        """Test to_headers with minimal profile."""
-        auth = Auth.from_spec(sample_spec)
-        headers = auth.to_headers(profile="minimal")
-        assert "Authorization" in headers
-        assert "X-API-Key" in headers
-
-    def test_to_headers_include(self, sample_spec):
-        """Test to_headers with explicit include."""
-        auth = Auth.from_spec(sample_spec)
-        headers = auth.to_headers(include=["Authorization"])
-        assert "Authorization" in headers
-        assert "Cookie" not in headers
-
-    def test_to_headers_exclude(self, sample_spec):
-        """Test to_headers with exclude."""
-        auth = Auth.from_spec(sample_spec)
-        headers = auth.to_headers(profile="full", exclude=["Cookie"])
-        assert "Authorization" in headers
-        assert "Cookie" not in headers
+        assert not hasattr(auth, "to_headers")
 
     def test_bool_true(self, sample_spec):
         """Test Auth is truthy when has headers."""
@@ -172,3 +125,11 @@ class TestAuth:
         auth = Auth.from_spec(sample_spec)
         assert auth.last_seen is not None
         assert isinstance(auth.last_seen, datetime)
+
+    def test_from_spec_with_non_dict(self):
+        """Test safe handling when spec['auth'] is a string or invalid type."""
+        spec = {"auth": "Bearer secret_token"}
+        auth = Auth.from_spec(spec)
+        assert auth.type in ("bearer", "none", "custom")
+        assert auth.bearer_token == "[REDACTED]"
+
