@@ -119,10 +119,14 @@ class TestStore:
 
     def test_file_permissions(self, store, sample_spec):
         """Test that spec files have restricted permissions."""
+        import os
+
         path = store.save("secure_test", sample_spec)
         store.flush()  # Force write to disk for permission check
-        # Check permissions (0o600 = user read/write only)
-        assert (path.stat().st_mode & 0o777) == 0o600
+        assert path.exists()
+        if os.name != "nt":
+            # Check permissions (0o600 = user read/write only) on POSIX
+            assert (path.stat().st_mode & 0o777) == 0o600
 
     def test_flush(self, store, sample_spec):
         """Test that flush writes dirty specs to disk."""

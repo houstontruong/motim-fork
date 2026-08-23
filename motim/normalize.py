@@ -1,8 +1,8 @@
-"""Normalization helpers for capture + replay.
+"""Normalization helpers for capture and discovery.
 
-These helpers are used to make captured data "replay safe":
+These helpers are used to make captured data normalized and consistent:
 - Cookie headers are stored/serialized consistently
-- Paths can be templatized so captured patterns match replay requests
+- Paths can be templatized so captured patterns match endpoint templates
 """
 
 from __future__ import annotations

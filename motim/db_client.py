@@ -19,8 +19,7 @@ from .exchange_db import ExchangeDB
 class DBClient(httpx.Client):
     """httpx.Client configured from the SQLite exchange DB.
 
-    This is best-effort and intended for stable APIs. For complex/private APIs,
-    prefer `motim replay` / `replay_exchange()` using an exemplar exchange.
+    This client queries discovered services and endpoint origins from the DB.
     """
 
     def __init__(

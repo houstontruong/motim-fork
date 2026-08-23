@@ -38,8 +38,8 @@ except PackageNotFoundError:  # pragma: no cover
     __version__ = "0.0.0"
 
 # Core classes
-from .agent_replay import diff_exchanges, replay_exchange
 from .auth import Auth
+from .diff import diff_exchanges
 
 # Convenience functions
 from .client import AsyncClient, Client, delete, get, patch, post, put
@@ -91,8 +91,7 @@ __all__ = [
     "ExchangeDB",
     "HeaderField",
     "BufferedExchangeWriter",
-    # Agent replay/diff helpers
-    "replay_exchange",
+    # Diff helpers
     "diff_exchanges",
     # Convenience functions
     "get",

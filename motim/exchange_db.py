@@ -366,58 +366,12 @@ class ExchangeDB:
             except Exception:
                 pass
 
-    def record_replay(
-        self,
-        *,
-        original_exchange_id: int,
-        replay_exchange_id: int,
-        ts: str | None = None,
-        tag: str | None = None,
-        origin: str | None = None,
-        set_headers: Sequence[str] = (),
-        drop_headers: Sequence[str] = (),
-        json_patches: Sequence[object] = (),
-        notes: Sequence[str] = (),
-    ) -> int:
-        """Persist metadata about a replay run."""
-        ts = ts or _utcnow_iso()
-        cur = self._conn.cursor()
-        try:
-            cur.execute(
-                """
-                INSERT INTO replays(
-                  ts, tag, original_exchange_id, replay_exchange_id,
-                  origin, set_headers_json, drop_headers_json, patch_json_json, notes_json
-                ) VALUES (?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    ts,
-                    tag,
-                    int(original_exchange_id),
-                    int(replay_exchange_id),
-                    origin,
-                    json.dumps(list(set_headers), ensure_ascii=False, separators=(",", ":")),
-                    json.dumps(list(drop_headers), ensure_ascii=False, separators=(",", ":")),
-                    json.dumps(list(json_patches), ensure_ascii=False, separators=(",", ":")),
-                    json.dumps(list(notes), ensure_ascii=False, separators=(",", ":")),
-                ),
-            )
-            self._conn.commit()
-            if cur.lastrowid is None:  # pragma: no cover
-                raise RuntimeError("SQLite insert did not return lastrowid")
-            return int(cur.lastrowid)
-        finally:
-            try:
-                cur.close()
-            except Exception:
-                pass
-
     def delete_service(self, service: str) -> dict[str, int]:
         """Delete all data for a service_key (and its indexes)."""
         skey = self.resolve_service_key(service) or service
         cur = self._conn.cursor()
         try:
-            # Delete raw exchanges (cascades to headers/bodies, and replays FK cascades).
+            # Delete raw exchanges (cascades to headers/bodies).
             cur.execute(
                 "DELETE FROM exchanges WHERE service_key = ?"
                 " OR REPLACE(COALESCE(host,''),'.','_') = ?",
@@ -452,8 +406,6 @@ class ExchangeDB:
         cur = self._conn.cursor()
         try:
             # Order matters with FKs.
-            cur.execute("DELETE FROM replays;")
-            replays_deleted = int(cur.rowcount or 0)
             cur.execute("DELETE FROM auth_snapshots;")
             snapshots_deleted = int(cur.rowcount or 0)
             cur.execute("DELETE FROM endpoints_index;")
@@ -465,7 +417,6 @@ class ExchangeDB:
 
             self._conn.commit()
             return {
-                "replays_deleted": replays_deleted,
                 "auth_snapshots_deleted": snapshots_deleted,
                 "endpoints_index_deleted": endpoints_deleted,
                 "services_index_deleted": services_deleted,
@@ -908,30 +859,6 @@ class ExchangeDB:
             "CREATE INDEX IF NOT EXISTS idx_auth_snapshots_service_ts "
             "ON auth_snapshots(service_key, ts DESC);"
         )
-
-        cur.execute(
-            """
-            CREATE TABLE IF NOT EXISTS replays (
-              id INTEGER PRIMARY KEY AUTOINCREMENT,
-              ts TEXT NOT NULL,
-              tag TEXT,
-              original_exchange_id INTEGER NOT NULL,
-              replay_exchange_id INTEGER NOT NULL,
-              origin TEXT,
-              set_headers_json TEXT,
-              drop_headers_json TEXT,
-              patch_json_json TEXT,
-              notes_json TEXT,
-              FOREIGN KEY(original_exchange_id) REFERENCES exchanges(id) ON DELETE CASCADE,
-              FOREIGN KEY(replay_exchange_id) REFERENCES exchanges(id) ON DELETE CASCADE
-            );
-            """
-        )
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_replays_ts ON replays(ts);")
-        cur.execute(
-            "CREATE INDEX IF NOT EXISTS idx_replays_original ON replays(original_exchange_id);"
-        )
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_replays_tag_ts ON replays(tag, ts DESC);")
 
         self._conn.commit()
 

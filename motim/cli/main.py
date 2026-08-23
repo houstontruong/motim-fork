@@ -4,8 +4,8 @@ from pathlib import Path
 
 import click
 
-from motim.agent_replay import diff_exchanges, replay_exchange
 from motim.config import get_config
+from motim.diff import diff_exchanges
 from motim.exchange_db import ExchangeDB
 
 from .config_cmd import config
@@ -20,10 +20,10 @@ from .services import services
 @click.group()
 @click.version_option(package_name="motim")
 def cli():
-    """MOTIM (Model Over Traffic — Intercept & Manage) - API traffic capture & replay for agents.
+    """MOTIM (Model Over Traffic — Intercept & Manage) - Production-safe API traffic capture & discovery.
 
-    Capture web API traffic and enable AI agents to make authenticated
-    requests to any service.
+    Capture web API traffic, index endpoints, and enable AI agents to discover
+    and inspect API schemas safely.
 
     Quick start:
         motim init           # First-time setup
@@ -537,109 +537,6 @@ def linkfinder(
 
 
 @cli.command()
-@click.argument("exchange_id", type=int)
-@click.option("--db", "db_path", help="Path to SQLite exchange DB (defaults to config)")
-@click.option("--tag", help="Tag this replay run (stored in DB)")
-@click.option(
-    "--transport",
-    type=click.Choice(["httpx", "curl"], case_sensitive=False),
-    default="httpx",
-    show_default=True,
-    help="HTTP transport for replay (curl uses curl_cffi)",
-)
-@click.option("--impersonate", help="curl transport only: browser TLS fingerprint (e.g. chrome)")
-@click.option("--origin", help="Override origin, e.g. https://example.com")
-@click.option("--set-header", "set_headers", multiple=True, help="Header override NAME=VALUE")
-@click.option("--drop-header", "drop_headers", multiple=True, help="Drop header by name")
-@click.option(
-    "--body-file",
-    type=click.Path(exists=True, dir_okay=False),
-    help="Replace body from file",
-)
-@click.option(
-    "--patch-json",
-    "json_patches",
-    multiple=True,
-    help="JSON merge patch to apply to body",
-)
-@click.option(
-    "--patch-file",
-    type=click.Path(exists=True, dir_okay=False),
-    help="Read JSON merge patch from file",
-)
-@click.option("--patch-stdin", is_flag=True, help="Read JSON merge patch from stdin")
-@click.option(
-    "--keep-hop-headers",
-    is_flag=True,
-    help="Keep hop-by-hop headers like Host/Content-Length",
-)
-@click.option("--timeout", type=float, default=30.0, show_default=True)
-@click.option("--http2/--no-http2", default=True, show_default=True)
-@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON")
-def replay(
-    exchange_id: int,
-    db_path: str | None,
-    tag: str | None,
-    transport: str,
-    impersonate: str | None,
-    origin: str | None,
-    set_headers: tuple[str, ...],
-    drop_headers: tuple[str, ...],
-    body_file: str | None,
-    json_patches: tuple[str, ...],
-    patch_file: str | None,
-    patch_stdin: bool,
-    keep_hop_headers: bool,
-    timeout: float,
-    http2: bool,
-    as_json: bool,
-):
-    """Replay a captured exchange and store the result back into the DB."""
-    import json as _json
-    import sys
-
-    with _open_db(db_path) as db:
-        body = None
-        if body_file:
-            body = Path(body_file).read_bytes()
-        patches = []
-        if json_patches:
-            for p in json_patches:
-                patches.append(_json.loads(p))
-        if patch_file:
-            patches.append(_json.loads(Path(patch_file).read_text()))
-        if patch_stdin:
-            patches.append(_json.loads(sys.stdin.read()))
-        result = replay_exchange(
-            db,
-            exchange_id,
-            tag=tag,
-            transport=transport,
-            impersonate=impersonate,
-            origin=origin,
-            set_headers=set_headers,
-            drop_headers=drop_headers,
-            body=body,
-            json_patches=patches,
-            keep_hop_by_hop=keep_hop_headers,
-            timeout=timeout,
-            http2=http2,
-        )
-        payload = {
-            "original_id": result.original_id,
-            "replay_id": result.replay_id,
-            "replay_record_id": result.replay_record_id,
-            "status": result.status,
-            "url": result.url,
-            "notes": result.notes,
-        }
-        if as_json:
-            click.echo(_json.dumps(payload, ensure_ascii=False))
-        else:
-            click.echo(f"replayed {result.original_id} -> {result.replay_id} ({result.status})")
-
-
-@cli.command()
 @click.argument("a_id", type=int)
 @click.argument("b_id", type=int)
 @click.option("--db", "db_path", help="Path to SQLite exchange DB (defaults to config)")
@@ -656,156 +553,6 @@ def diff(a_id: int, b_id: int, db_path: str | None, as_json: bool):
             click.echo(_json.dumps(d, ensure_ascii=False))
         else:
             click.echo(f"{a_id} -> {b_id}: {a.get('status')} -> {b.get('status')}")
-
-
-@cli.command()
-@click.argument("exchange_id", type=int)
-@click.option("--db", "db_path", help="Path to SQLite exchange DB (defaults to config)")
-@click.option("--tag", help="Tag applied to all probe runs")
-@click.option(
-    "--transport",
-    type=click.Choice(["httpx", "curl"], case_sensitive=False),
-    default="httpx",
-    show_default=True,
-    help="HTTP transport for replay (curl uses curl_cffi)",
-)
-@click.option("--impersonate", help="curl transport only: browser TLS fingerprint (e.g. chrome)")
-@click.option(
-    "--patch-json",
-    "json_patches",
-    multiple=True,
-    help="JSON merge patch (each one is a run)",
-)
-@click.option(
-    "--patch-file",
-    type=click.Path(exists=True, dir_okay=False),
-    help="Read JSON merge patch from file (added as a run)",
-)
-@click.option(
-    "--patch-stdin", is_flag=True, help="Read JSON merge patch from stdin (added as a run)"
-)
-@click.option(
-    "--drop-header",
-    "drop_headers",
-    multiple=True,
-    help="Drop header by name (each one is a run)",
-)
-@click.option("--origin", help="Override origin, e.g. https://example.com")
-@click.option("--timeout", type=float, default=30.0, show_default=True)
-@click.option("--http2/--no-http2", default=True, show_default=True)
-@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON")
-def probe(
-    exchange_id: int,
-    db_path: str | None,
-    tag: str | None,
-    transport: str,
-    impersonate: str | None,
-    json_patches: tuple[str, ...],
-    patch_file: str | None,
-    patch_stdin: bool,
-    drop_headers: tuple[str, ...],
-    origin: str | None,
-    timeout: float,
-    http2: bool,
-    as_json: bool,
-):
-    """Run multiple replay mutations against a baseline and summarize diffs.
-
-    Automatically replays a baseline first, then runs each mutation and diffs
-    against the baseline. Each --patch-json value is a separate run, and each
-    --drop-header value is a separate run.
-    """
-    import json as _json
-    import sys
-
-    with _open_db(db_path) as db:
-        # Replay a baseline first
-        baseline = replay_exchange(
-            db,
-            exchange_id,
-            tag=tag,
-            transport=transport,
-            impersonate=impersonate,
-            origin=origin,
-            timeout=timeout,
-            http2=http2,
-        )
-        baseline_ex = db.get_exchange(baseline.replay_id)
-
-        runs: list[dict[str, object]] = []
-
-        all_patches = list(json_patches or ())
-        if patch_file:
-            all_patches.append(Path(patch_file).read_text())
-        if patch_stdin:
-            all_patches.append(sys.stdin.read())
-
-        for p in all_patches:
-            patch_obj = _json.loads(p)
-            r = replay_exchange(
-                db,
-                exchange_id,
-                tag=tag,
-                transport=transport,
-                impersonate=impersonate,
-                origin=origin,
-                json_patches=[patch_obj],
-                timeout=timeout,
-                http2=http2,
-            )
-            run_ex = db.get_exchange(r.replay_id)
-            d = diff_exchanges(baseline_ex, run_ex)
-            runs.append(
-                {
-                    "kind": "patch_json",
-                    "patch": patch_obj,
-                    "replay_id": r.replay_id,
-                    "status": r.status,
-                    "diff": d,
-                }
-            )
-
-        for h in drop_headers or ():
-            r = replay_exchange(
-                db,
-                exchange_id,
-                tag=tag,
-                transport=transport,
-                impersonate=impersonate,
-                origin=origin,
-                drop_headers=[h],
-                timeout=timeout,
-                http2=http2,
-            )
-            run_ex = db.get_exchange(r.replay_id)
-            d = diff_exchanges(baseline_ex, run_ex)
-            runs.append(
-                {
-                    "kind": "drop_header",
-                    "header": h,
-                    "replay_id": r.replay_id,
-                    "status": r.status,
-                    "diff": d,
-                }
-            )
-
-        payload = {
-            "original_id": exchange_id,
-            "baseline_id": baseline.replay_id,
-            "baseline_status": baseline.status,
-            "runs": runs,
-        }
-        if as_json:
-            click.echo(_json.dumps(payload, ensure_ascii=False))
-        else:
-            click.echo(
-                f"probe base={exchange_id} baseline={baseline.replay_id}"
-                f" ({baseline.status}) runs={len(runs)}"
-            )
-            for run in runs:
-                status_changed = run["status"] != baseline.status
-                marker = " *" if status_changed else ""
-                click.echo(f"  {run['kind']}: {run['status']} -> {run['replay_id']}{marker}")
 
 
 @cli.command()
@@ -906,60 +653,6 @@ def session(
                 )
             if len(items) > 25:
                 click.echo(f"... {len(items) - 25} more")
-
-
-@cli.command(name="replay-seq")
-@click.argument("exchange_ids", type=int, nargs=-1)
-@click.option("--db", "db_path", help="Path to SQLite exchange DB (defaults to config)")
-@click.option("--tag", help="Tag applied to all replay runs")
-@click.option(
-    "--transport",
-    type=click.Choice(["httpx", "curl"], case_sensitive=False),
-    default="httpx",
-    show_default=True,
-    help="HTTP transport for replay (curl uses curl_cffi)",
-)
-@click.option("--impersonate", help="curl transport only: browser TLS fingerprint (e.g. chrome)")
-@click.option("--origin", help="Override origin, e.g. https://example.com")
-@click.option("--timeout", type=float, default=30.0, show_default=True)
-@click.option("--http2/--no-http2", default=True, show_default=True)
-@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON")
-def replay_seq(
-    exchange_ids: tuple[int, ...],
-    db_path: str | None,
-    tag: str | None,
-    transport: str,
-    impersonate: str | None,
-    origin: str | None,
-    timeout: float,
-    http2: bool,
-    as_json: bool,
-):
-    """Replay a sequence of exchanges in order (stores all results back into DB)."""
-    import json as _json
-
-    if not exchange_ids:
-        raise click.UsageError("Provide at least one exchange id")
-
-    with _open_db(db_path) as db:
-        out: list[dict[str, object]] = []
-        for eid in exchange_ids:
-            r = replay_exchange(
-                db,
-                int(eid),
-                tag=tag,
-                transport=transport,
-                impersonate=impersonate,
-                origin=origin,
-                timeout=timeout,
-                http2=http2,
-            )
-            out.append({"original_id": int(eid), "replay_id": r.replay_id, "status": r.status})
-        if as_json:
-            click.echo(_json.dumps(out, ensure_ascii=False))
-        else:
-            for item in out:
-                click.echo(f"{item['original_id']} -> {item['replay_id']} ({item['status']})")
 
 
 @cli.command(name="export-yaml")

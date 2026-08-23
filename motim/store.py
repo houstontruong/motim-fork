@@ -295,7 +295,7 @@ class Store:
                 "last_seen": datetime.now().isoformat(),
             }
 
-            # Store cookies separately (replay-safe) if present.
+            # Store cookies separately if present.
             for k, v in important_headers.items():
                 if k.lower() == "cookie" and isinstance(v, str):
                     cookies = parse_cookie_header(v)
@@ -350,7 +350,7 @@ class Store:
         if endpoint not in spec["observed_endpoints"]:
             spec["observed_endpoints"].append(endpoint)
 
-        # Track per-endpoint base URL (for replay across subdomains/origins).
+        # Track per-endpoint base URL (for endpoints across subdomains/origins).
         if scheme is None:
             # Best-effort inference; if unknown, default to https.
             scheme = "https"
