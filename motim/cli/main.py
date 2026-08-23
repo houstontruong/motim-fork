@@ -15,6 +15,7 @@ from .proxy import start as proxy_start
 from .proxy import status as proxy_status
 from .proxy import stop as proxy_stop
 from .proxy import trust_cert as proxy_trust_cert
+from .reconcile_cmd import facts_cmd, issues_cmd, reconcile_cmd
 from .services import services
 
 
@@ -34,10 +35,14 @@ def cli():
     pass
 
 
-# Register command groups
+# Register command groups & subcommands
 cli.add_command(proxy)
 cli.add_command(services)
 cli.add_command(config)
+cli.add_command(reconcile_cmd)
+cli.add_command(facts_cmd)
+cli.add_command(issues_cmd)
+
 
 
 def _open_db(db_path: str | None = None) -> ExchangeDB:

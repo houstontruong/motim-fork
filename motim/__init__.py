@@ -53,6 +53,7 @@ from .exceptions import (
 from .exchange_db import ExchangeDB, HeaderField
 from .exchange_writer import BufferedExchangeWriter
 from .redact import Redactor, get_redactor
+from .reconcile import AccountReadResult, Fact, Issue, reconcile
 from .service import EndpointCollection, Sample, SampleCollection, SampleComparison, Service
 from .store import Store, get_store
 
@@ -94,4 +95,10 @@ __all__ = [
     "BufferedExchangeWriter",
     # Diff helpers
     "diff_exchanges",
+    # Reconciliation
+    "reconcile",
+    "AccountReadResult",
+    "Fact",
+    "Issue",
 ]
+

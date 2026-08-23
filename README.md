@@ -133,7 +133,35 @@ motim js-endpoints [--service S]
 motim export-yaml SERVICE       # YAML spec summary
 motim rebuild-index             # rebuild derived indexes
 motim config show               # view config
+
+# Offline Reconciliation (motim.account_read.v1)
+motim reconcile --input FIXTURE --provider bybit --as-of RFC3339Z
+motim facts --result RESULT_JSON [--type TYPE]
+motim issues --result RESULT_JSON [--code CODE]
 ```
+
+---
+
+## Offline Account-Read Reconciliation API
+
+```python
+from motim import reconcile
+
+# Translate sanitized exchange exports into structured facts (offline only)
+result = reconcile(
+    "fixtures/bybit_all_facts.jsonl",
+    provider="bybit",
+    as_of="2026-08-23T14:05:00Z",
+    max_age_seconds=0,
+    strict=True,
+)
+
+print(result.outcome)  # 'ok', 'partial', 'unsupported_schema', or 'invalid_input'
+for fact in result.facts:
+    print(fact.fact_type, fact.data)
+```
+
+See [ACCOUNT_READ_CONTRACT.md](file:///C:/Users/houst/PycharmProjects/motim-fork/ACCOUNT_READ_CONTRACT.md) for full contract specifications and exit code mappings.
 
 ---
 

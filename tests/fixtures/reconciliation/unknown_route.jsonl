@@ -1,0 +1,1 @@
+{"schema_version": "motim.sanitized_exchange.v1", "exchange_id": "bybit-unknown-001", "provider": "bybit", "captured_at": "2026-08-23T14:00:00Z", "request": {"method": "GET", "route_key": "unsupported_custom_endpoint"}, "response": {"status": 200, "content_type": "application/json", "body": {"unknown_field": "unknown_value"}}}
